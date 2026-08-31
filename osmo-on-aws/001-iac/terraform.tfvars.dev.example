@@ -72,6 +72,9 @@ gpu_node_capacity_type  = "ON_DEMAND"
 gpu_node_volume_size    = 500 # Root EBS (GiB); 500+ for Isaac Sim / Cosmos workflows
 # REQUIRED: Canonical Ubuntu EKS AMI for your region + Kubernetes version.
 # Look it up at https://cloud-images.ubuntu.com/docs/aws/eks/ (example below is us-west-2, Noble 24.04, k8s 1.35, amd64).
+# GPU nodes hold their kernel metapackages (see modules/eks/node-groups.tf), so refreshing this AMI is the
+# only way they receive kernel security patches. Re-pin it periodically and cycle the GPU node group,
+# confirming the driver still builds against the new kernel.
 gpu_ami_id              = "ami-0d10cbd3200341288"
 
 #------------------------------------------------------------------------------

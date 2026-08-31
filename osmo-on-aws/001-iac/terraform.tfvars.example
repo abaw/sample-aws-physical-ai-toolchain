@@ -35,6 +35,9 @@ keycloak_admin_username = "admin"
 
 # REQUIRED: Canonical Ubuntu EKS AMI for your region + Kubernetes version
 # Look it up at https://cloud-images.ubuntu.com/docs/aws/eks/
+# GPU nodes hold their kernel metapackages (see modules/eks/node-groups.tf), so refreshing
+# this AMI is the only way they receive kernel security patches. Re-pin it periodically and
+# cycle the GPU node group, confirming the driver still builds against the new kernel.
 gpu_ami_id        = "ami-xxxxxxxxxxxxxxxxx"
 
 # Required only for backend-only mode

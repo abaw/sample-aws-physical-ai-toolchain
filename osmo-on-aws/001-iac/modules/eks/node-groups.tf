@@ -53,6 +53,32 @@ locals {
   # Whether a custom AMI is being used (e.g. Canonical Ubuntu EKS)
   use_custom_gpu_ami = var.gpu_ami_id != ""
 
+  # Freeze the kernel on GPU nodes.
+  #
+  # The GPU Operator builds the NVIDIA kernel modules on the node, against the
+  # *running* kernel. Ubuntu's unattended-upgrades will install a whole new
+  # kernel series (observed in this deployment: 6.17 -> 7.0) and the next reboot
+  # lands the node on a kernel the pinned driver cannot build nvidia-uvm
+  # against. The failure is quiet: the node stays Ready and schedulable but
+  # advertises nvidia.com/gpu: 0, so GPU pods sit Pending forever while a pod
+  # that does not request a GPU runs on the node with no device at all.
+  #
+  # Holding the kernel metapackages makes gpu_ami_id govern the kernel for the
+  # node's whole life rather than only its first boot, so the upgrade path
+  # becomes a deliberate AMI change. Non-kernel security updates still apply.
+  #
+  # The Ubuntu EKS AMI already protects containerd and the CNI tooling this way
+  # in 55uu-blacklist-pins.conf. "::" appends to that list rather than replacing
+  # it, so those entries survive.
+  gpu_kernel_hold_user_data = <<-EOT
+    {
+      echo 'Unattended-Upgrade::Package-Blacklist:: "^linux-aws$";'
+      echo 'Unattended-Upgrade::Package-Blacklist:: "^linux-image-aws$";'
+      echo 'Unattended-Upgrade::Package-Blacklist:: "^linux-headers-aws$";'
+    } > /etc/apt/apt.conf.d/60uu-blacklist-kernel.conf
+    apt-mark hold linux-aws linux-image-aws linux-headers-aws || true
+  EOT
+
   # GPU node group configuration (conditional)
   gpu_node_group = var.deploy_gpu_nodes ? {
     gpu = {
@@ -68,6 +94,11 @@ locals {
       # When using a custom AMI the module must generate the
       # /etc/eks/bootstrap.sh call via launch-template user data.
       enable_bootstrap_user_data = local.use_custom_gpu_ami
+
+      # Pin the kernel before the node joins, so an unattended upgrade can never
+      # move it off the kernel the pinned driver builds against.
+      # See gpu_kernel_hold_user_data above.
+      pre_bootstrap_user_data = local.use_custom_gpu_ami ? local.gpu_kernel_hold_user_data : ""
 
       min_size     = var.gpu_node_min_size
       max_size     = var.gpu_node_max_size
