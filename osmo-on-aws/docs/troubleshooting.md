@@ -216,6 +216,76 @@ NVIDIA support wired in.
 set `dependencies.gpu_operator_version: "v25.10.1"` (or `export
 GPU_OPERATOR_VERSION=v25.10.1`) and re-run `02-deploy-gpu-infrastructure.sh`.
 
+#### Node is `Ready` but advertises `nvidia.com/gpu: 0`, driver pod `CrashLoopBackOff`
+
+**Symptom:** a GPU node is `Ready` and schedulable, but reports no GPUs.
+`nvidia-driver-daemonset` crash-loops and everything downstream of it is stuck
+behind `nvidia-operator-validator`:
+
+```
+nvidia-driver-daemonset-xxxxx      0/1  CrashLoopBackOff
+nvidia-operator-validator-xxxxx    0/1  Init:0/4
+nvidia-device-plugin-daemonset-x   0/1  Init:0/1
+```
+
+Note that nothing alarms: the node stays `Ready`, so GPU pods sit `Pending`
+forever, and a resource spec that does *not* request `nvidia.com/gpu` will
+schedule onto the node and run with no GPU at all.
+
+**This looks identical to the containerd 2.x failure above.** The only way to tell
+them apart is to read the driver log — always do this first:
+
+```bash
+# The first line names the kernel the driver is trying to build against
+kubectl -n gpu-operator logs -l app=nvidia-driver-daemonset --tail=50 | head -20
+
+# Compare with the kernel the node is actually running
+kubectl get nodes -o custom-columns='NAME:.metadata.name,KERNEL:.status.nodeInfo.kernelVersion'
+```
+
+If the log ends in `The nvidia-uvm kernel module failed to build`, this entry
+applies. If instead the toolkit is rejecting `config.toml`, see the containerd 2.x
+entry above.
+
+**Cause:** on Ubuntu GPU nodes, the driver container compiles its kernel modules
+against the node's *running* kernel. Ubuntu's `unattended-upgrades` will upgrade
+the `linux-image-aws` metapackage across a whole kernel series (observed:
+`6.17` → `7.0`), and the next reboot lands the node on a kernel the pinned driver
+has no `nvidia-uvm` support for. Pinning `gpu_ami_id` fixes only the *initial*
+kernel, so it gives no protection once the node has been running for a while.
+
+```bash
+# On-node confirmation (via SSM):
+uname -r                    # running kernel — newer than the AMI's?
+apt-mark showhold           # should list the kernel metapackages
+grep -h linux /var/log/unattended-upgrades/unattended-upgrades.log*
+```
+
+**Solution:** GPU node groups now hold their kernel metapackages from user-data
+(`001-iac/modules/eks/node-groups.tf`), so a node launched from that launch
+template cannot drift. To recover a node that has *already* drifted, **replace it** —
+cycle the GPU node group rather than trying to roll the kernel back:
+
+```bash
+# Force a rolling replacement onto the pinned AMI
+aws eks update-nodegroup-version --cluster-name <cluster> --nodegroup-name <gpu-ng>
+```
+
+Two traps when recovering:
+
+- **Booting back into the old kernel usually is not possible.** `unattended-upgrades`
+  autoremoves superseded kernels, so the AMI's original kernel is typically already
+  gone from `/boot` and from the GRUB menu — check `dpkg -l | grep <old-version>`
+  for `rc` (removed) status before planning a rollback.
+- **`ls /lib/modules` over-reports.** An autoremoved kernel leaves a directory
+  containing only `modules.*` metadata and no `kernel/` subdirectory. It looks
+  present but is not bootable; trust `/boot` and `grep menuentry /boot/grub/grub.cfg`
+  instead.
+
+Because the kernel is held, refreshing `gpu_ami_id` is now the only way GPU nodes
+receive kernel security patches — re-pin it periodically and cycle the node group,
+confirming the driver still builds against the new AMI's kernel.
+
 #### GPU nodes fail to launch — `VcpuLimitExceeded` / `InsufficientInstanceCapacity`
 
 **Symptom:** the GPU node group never reaches its desired count; the backing EC2
