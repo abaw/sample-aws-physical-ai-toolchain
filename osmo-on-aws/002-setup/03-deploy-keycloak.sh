@@ -369,7 +369,8 @@ YAML
         \"adminUrl\": \"https://${osmo_hostname}\",
         \"redirectUris\": [\"https://${osmo_hostname}/*\"],
         \"webOrigins\": [\"https://${osmo_hostname}\"],
-        \"defaultClientScopes\": [\"openid\", \"email\", \"profile\", \"roles\"]
+        \"defaultClientScopes\": [\"email\", \"profile\", \"roles\"],
+        \"optionalClientScopes\": [\"offline_access\"]
       }" >/dev/null
     pass "Client 'osmo-browser-flow' created"
   else
@@ -404,7 +405,8 @@ YAML
         \"rootUrl\": \"https://${osmo_hostname}\",
         \"redirectUris\": [\"https://${osmo_hostname}/*\"],
         \"webOrigins\": [\"https://${osmo_hostname}\"],
-        \"defaultClientScopes\": [\"openid\", \"email\", \"profile\", \"roles\"]
+        \"defaultClientScopes\": [\"email\", \"profile\", \"roles\"],
+        \"optionalClientScopes\": [\"offline_access\"]
       }" >/dev/null
     pass "Client 'osmo-device' created"
   else
@@ -535,23 +537,40 @@ YAML
   pass "Group-to-role bindings configured"
 
   # Create admin user in the osmo realm
-  local keycloak_admin_username
+  local keycloak_admin_username keycloak_admin_email
   keycloak_admin_username=$(tf_get "$tf_outputs" "keycloak_admin_username" "admin")
+  # Synthesised rather than configurable: Keycloak only needs a syntactically valid
+  # address to satisfy the realm's user-profile requirements. No mail is ever sent
+  # to it — the realm has no SMTP configured, and the OSMO domains publish
+  # SPF/DMARC records that reject mail outright.
+  keycloak_admin_email="${KEYCLOAK_ADMIN_EMAIL:-${keycloak_admin_username}@${osmo_hostname}}"
 
   local user_exists
   user_exists=$(kc_api GET "${kc_url}/admin/realms/osmo/users?username=${keycloak_admin_username}&exact=true" "$token" | jq 'length')
 
   if [[ "$user_exists" == "0" ]]; then
     info "Creating OSMO admin user '${keycloak_admin_username}' in osmo realm..."
+    # firstName/lastName/email must all be set. VERIFY_PROFILE is enabled in the
+    # realm, and Keycloak injects it as a required action whenever the profile is
+    # incomplete — which makes every login fail with the opaque "Account is not
+    # fully set up", even though the user's own requiredActions list looks empty.
+    #
+    # temporary=false is deliberate: a temporary password forces UPDATE_PASSWORD,
+    # which only a browser can clear, so `osmo login` on a fresh install would be
+    # impossible until someone visited the account console out of band.
     kc_api POST "${kc_url}/admin/realms/osmo/users" "$token" \
       -d "{
         \"username\": \"${keycloak_admin_username}\",
         \"enabled\": true,
         \"emailVerified\": true,
+        \"email\": \"${keycloak_admin_email}\",
+        \"firstName\": \"OSMO\",
+        \"lastName\": \"Admin\",
+        \"requiredActions\": [],
         \"credentials\": [{
           \"type\": \"password\",
           \"value\": \"${admin_password}\",
-          \"temporary\": true
+          \"temporary\": false
         }]
       }" >/dev/null
 
