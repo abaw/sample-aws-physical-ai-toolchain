@@ -1,0 +1,215 @@
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# so101-vla stage 03 — replay held-out trajectories through a fine-tuned checkpoint and
+# compare predicted actions against ground truth, offline. This is the stop/go gate for
+# stage 04: it is the last chance to catch a bad policy before one drives a real arm.
+#
+#   osmo workflow submit osmo-on-aws/003-workflows/so101-vla/03_openloop_eval.yaml \
+#     --set storage_url=s3://<bucket>/so101-vla \
+#           dataset_url=s3://<bucket>/so101-vla/dataset/<name>/ \
+#           checkpoint_url=s3://<bucket>/so101-vla/checkpoints/gr00t-n17/<run-id>/checkpoint-<step>/
+#
+# One `--set` takes every override. Repeating the flag is not an error and is not
+# additive — only the last group survives, and the run proceeds with the placeholder
+# defaults below.
+#
+# Three failure modes present identically on hardware — as "the arm moves wrongly" —
+# and this stage separates them cheaply:
+#
+#   * a modality or joint-order mistake: the prediction tracks the wrong channel;
+#   * missing normalization statistics: predictions come out at the wrong scale;
+#   * under-training: predictions simply do not track ground truth.
+#
+# Upstream's "Interpreting the Result: Is My Fine-tune Working?" section explains how to
+# read the plots; use it rather than inventing a rubric. Evaluate several held-out
+# trajectories — one lucky trajectory is not convergence.
+#
+# Needs the same `HF_TOKEN` credential as stage 02: the checkpoint carries the action
+# head, but the VLM processor is still fetched from a gated Hub repo at load time.
+#
+# One GPU is plenty — this is inference on one 3B model, not training.
+
+default-values:
+  model: gr00t-n17
+
+  # Stage 01's published dataset, and one checkpoint from a stage 02 run.
+  #
+  # Name a single `checkpoint-<step>/` prefix. Pointing checkpoint_url at the whole run
+  # prefix also works, but that prefix holds every retained checkpoint at ~24 Gi each,
+  # and all of them are downloaded before the task starts.
+  dataset_url: s3://REPLACE-WITH-YOUR-DATASETS-BUCKET/so101-vla/dataset/so101-sample/
+  checkpoint_url: s3://REPLACE-WITH-YOUR-DATASETS-BUCKET/so101-vla/checkpoints/gr00t-n17/REPLACE-WITH-A-RUN-ID/checkpoint-REPLACE-WITH-A-STEP/
+  storage_url: s3://REPLACE-WITH-YOUR-DATASETS-BUCKET/so101-vla
+
+  # Only meaningful when checkpoint_url is a whole run prefix: which checkpoint-<step>
+  # inside it to load. Leave empty otherwise.
+  checkpoint_step: ""
+
+  # --- what to evaluate ------------------------------------------------------
+  # Space-separated episode indices. Use episodes the fine-tune did not train on.
+  traj_ids: "0 1 2"
+  # Capped by the trajectory length, so a large value just means "the whole episode".
+  steps: 400
+  # Steps of each predicted chunk executed before re-planning. Must not exceed the
+  # chunk length the checkpoint was trained with, and it is the same knob stage 04
+  # trades against network round-trip time — so evaluate here at the value you intend
+  # to drive the arm with.
+  execution_horizon: 16
+  # Diffusion denoising steps. Fewer is faster and slightly less accurate; this is the
+  # other half of stage 04's latency budget.
+  denoising_steps: 4
+
+  # --- resources -------------------------------------------------------------
+  eval_platform: l40s
+  # `cpu` must be an integer, and the osmo-ctrl sidecar adds a fixed 1 vCPU on top.
+  eval_cpu: 4
+  eval_memory_gi: 32
+  # Toolchain venv (~15 Gi) + base model pulled by the processor (~15 Gi) + the
+  # dataset + the checkpoint. A stage 02 checkpoint is ~24 Gi; raise
+  # checkpoint_size_gi if checkpoint_url names a whole run prefix.
+  dataset_size_gi: 1
+  checkpoint_size_gi: 25
+  eval_storage_gi: 40
+
+  image: nvcr.io/nvidia/pytorch:25.04-py3
+
+  exec_timeout: 2h
+
+workflow:
+  name: so101-{{ model }}-openloop-eval
+  resources:
+    eval:
+      platform: "{{ eval_platform }}"
+      gpu: 1
+      cpu: {{ eval_cpu }}
+      memory: {{ eval_memory_gi }}Gi
+      storage: {{ eval_storage_gi + dataset_size_gi + checkpoint_size_gi }}Gi
+  tasks:
+  - name: openloop-eval
+    image: "{{ image }}"
+    resource: eval
+    credentials:
+      huggingface_token:
+        HF_TOKEN: token
+    inputs:
+    - url: {{ dataset_url }}
+    - url: {{ checkpoint_url }}
+    outputs:
+    - url: {{ storage_url }}/openloop/{{ model }}/{{workflow_id}}/
+    files:
+    - localpath: files/gr00t/install_n17.sh
+      path: /tmp/install_n17.sh
+    command: [bash, -c]
+    args:
+      - |
+        set -euo pipefail
+
+        # OSMO does not validate s3 output URLs at submit time, so without this a
+        # forgotten --set fails at upload, after the whole run.
+        case "{{ storage_url }}{{ checkpoint_url }}" in
+          *REPLACE-WITH-*)
+            echo "ERROR: pass --set storage_url=... and --set checkpoint_url=..." >&2
+            exit 2 ;;
+        esac
+
+        # ffmpeg is required, not convenience: the base image ships none, and the video
+        # backend this eval reads frames through cannot decode without it. git-lfs is
+        # required too — see files/gr00t/install_n17.sh.
+        apt-get update -qq
+        apt-get install -y -qq git git-lfs ffmpeg
+
+        # Exports GROOT_DIR and puts the venv on PATH.
+        source /tmp/install_n17.sh
+
+        # Find the root by the file that must exist, rather than assuming nesting depth.
+        INFO="$(find {{input:0}} -name info.json -path '*/meta/*' | head -1)"
+        if [ -z "$INFO" ]; then
+          echo "ERROR: no meta/info.json under {{input:0}} — is {{ dataset_url }} a prepared dataset prefix?" >&2
+          find {{input:0}} -maxdepth 3 >&2
+          exit 1
+        fi
+        DS="$(dirname "$(dirname "$INFO")")"
+        echo "dataset root: ${DS}"
+
+{% if checkpoint_step %}
+        CKPT="$(find {{input:1}} -type d -name 'checkpoint-{{ checkpoint_step }}' | head -1)"
+{% else %}
+        # A single checkpoint prefix is already a model directory. A whole run prefix is
+        # not: it holds the checkpoints as subdirectories, and -V is what sorts
+        # checkpoint-900 before checkpoint-1000, which a plain lexical sort gets
+        # backwards.
+        if [ -f "{{input:1}}/config.json" ]; then
+          CKPT="{{input:1}}"
+        else
+          CKPT="$(find {{input:1}} -type d -name 'checkpoint-*' | sort -V | tail -1)"
+        fi
+{% endif %}
+        if [ -z "${CKPT}" ]; then
+          echo "ERROR: no matching checkpoint-<step> directory under {{input:1}}" >&2
+          find {{input:1}} -maxdepth 3 -type d >&2
+          exit 1
+        fi
+        echo "checkpoint: ${CKPT}"
+
+        # A checkpoint without normalization statistics loads without complaint and then
+        # predicts at the wrong scale, which looks like a bad fine-tune. Name the real
+        # cause instead.
+        if [ ! -f "${CKPT}/experiment_cfg/dataset_statistics.json" ]; then
+          echo "ERROR: ${CKPT} has no experiment_cfg/dataset_statistics.json — the training run did not publish a complete checkpoint" >&2
+          exit 1
+        fi
+
+        mkdir -p {{output}}/plots
+
+        # --save-plot-path is deliberately not passed: it names a single file, so with
+        # several trajectories each would overwrite the last. Left unset, the eval
+        # writes one plot per trajectory under its own directory, which is then
+        # published whole.
+        PLOT_DIR=/tmp/open_loop_eval
+        rm -rf "${PLOT_DIR}"
+
+        cd "${GROOT_DIR}"
+        # pipefail is set, so a failing eval still fails the task despite the tee.
+        python gr00t/eval/open_loop_eval.py \
+          --dataset-path "${DS}" \
+          --embodiment-tag NEW_EMBODIMENT \
+          --model-path "${CKPT}" \
+          --traj-ids {{ traj_ids }} \
+          --execution-horizon {{ execution_horizon }} \
+          --denoising-steps {{ denoising_steps }} \
+          --steps {{ steps }} 2>&1 | tee {{output}}/openloop_eval.log
+
+        cp "${PLOT_DIR}"/*.jpeg {{output}}/plots/
+
+        # The per-trajectory and average errors only exist in the log. Pulled out so the
+        # go/no-go number is readable from the published prefix without reading it all.
+        grep -E "MSE for trajectory|Average MSE|Average MAE" \
+          {{output}}/openloop_eval.log > {{output}}/metrics.txt
+        cat {{output}}/metrics.txt
+
+        # Required, and the failure it prevents is silent. The task runs as root while
+        # the sidecar that uploads runs unprivileged, so anything written via tempfile
+        # is mode 0600 and unreadable to it. OSMO logs the per-file permission errors,
+        # then reports "All Outputs Uploaded" and marks the task COMPLETED — so without
+        # this, plots go missing and nothing says so.
+        chmod -R a+rX {{output}}
+
+        echo "published to {{ storage_url }}/openloop/{{ model }}/{{workflow_id}}/"
+        ls -la {{output}} {{output}}/plots
+        # Check the published prefix against this count; see the chmod note above.
+        echo "files to upload: $(find {{output}} -type f | wc -l)"
+  timeout:
+    exec_timeout: {{ exec_timeout }}

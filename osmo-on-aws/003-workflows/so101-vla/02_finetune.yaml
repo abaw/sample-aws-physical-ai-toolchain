@@ -1,0 +1,243 @@
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# so101-vla stage 02 — fine-tune GR00T N1.7 on the dataset stage 01 published, and
+# publish the checkpoints to a per-run S3 prefix that stages 03 and 04 read.
+#
+#   osmo workflow submit osmo-on-aws/003-workflows/so101-vla/02_finetune.yaml \
+#     --set storage_url=s3://<bucket>/so101-vla \
+#           dataset_url=s3://<bucket>/so101-vla/dataset/<name>/ \
+#           dataset_size_gi=<size>
+#
+# One `--set` takes every override. Repeating the flag is not an error and is not
+# additive — only the last group survives, and the run proceeds with the placeholder
+# defaults below.
+#
+# Smoke-test it first with `--set max_steps=10 save_steps=10 exec_timeout=1h`: that
+# exercises the whole path — model download, dataset load, optimizer step, checkpoint
+# upload — in a few minutes instead of hours, and leaves a real checkpoint for stage 03
+# to be tested against.
+#
+# Requires an `HF_TOKEN` credential:
+#
+#   osmo credential set huggingface_token --type GENERIC \
+#     --payload-file token=<path-to-file-holding-the-token>
+#
+# The base model is public, but its VLM backbone and processor are pulled from a
+# separate *gated* repo, so an anonymous run dies at model construction. The Hub
+# account behind the token must have accepted that repo's terms.
+#
+# Wall clock is dominated by `max_steps`; the ~3 minutes of toolchain install and the
+# base-model download are fixed overhead. Budget `exec_timeout` from a smoke run's
+# steps/second rather than guessing, and remember a task killed by the timeout
+# publishes nothing.
+
+default-values:
+  # Only gr00t-n17 is implemented. It names the checkpoint prefix as well, so a second
+  # model cannot overwrite this one's runs.
+  model: gr00t-n17
+
+  # Stage 01's published prefix, not the raw recording.
+  dataset_url: s3://REPLACE-WITH-YOUR-DATASETS-BUCKET/so101-vla/dataset/so101-sample/
+  storage_url: s3://REPLACE-WITH-YOUR-DATASETS-BUCKET/so101-vla
+
+  # --- what actually decides how many GPUs this needs -------------------------
+  # Trainable parameters, and therefore the optimizer state that dominates VRAM, are
+  # set by these two. With both off — the upstream default, and upstream's own SO-101
+  # recipe — the projector and the diffusion action head still amount to roughly half
+  # the model, and peak at about 90% of one 48 GB card at the batch size below. That
+  # fits, but leaves no room: raising global_batch_size, or turning either flag on to
+  # unfreeze a tower, needs a multi-GPU node, where the trainer shards optimizer state
+  # automatically.
+  #
+  # The trainer logs `Trainable parameters` at startup: check it against what you
+  # intended before letting a long run proceed.
+  tune_visual: false
+  tune_llm: false
+
+  # --- training hyperparameters ----------------------------------------------
+  max_steps: 10000
+  save_steps: 1000
+  global_batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 1e-4
+  # Each worker holds decoded video frames, so this trades host RAM for GPU idle time.
+  # Zero is not a performance choice: worker processes hand batches to the trainer
+  # through /dev/shm, and a task pod gets the Kubernetes default 64 MB, which is far too
+  # small for decoded frames — any positive value dies at step 0 with a bus error and
+  # "insufficient shared memory". Raise it only once the platform mounts a larger
+  # /dev/shm; the spec has no field for it.
+  dataloader_num_workers: 0
+
+  # --- resources -------------------------------------------------------------
+  # How many GPUs to train with. The reference deployment's GPU platform has a single
+  # one-GPU node, so anything above 1 is rejected at submit. On a larger platform,
+  # global_batch_size must be divisible by this — it is split across the GPUs, so the
+  # per-card batch, and the VRAM it needs, shrink as this grows.
+  num_gpus: 1
+  train_platform: l40s
+  # `cpu` must be an integer, and the osmo-ctrl sidecar adds a fixed 1 vCPU on top of
+  # this, so the platform needs train_cpu + 1 free.
+  train_cpu: 4
+  train_memory_gi: 48
+
+  # `storage` is scheduled: under-request and kubelet evicts the pod mid-run,
+  # over-request and the submit is rejected for exceeding the node. It has to cover
+  # the toolchain venv (~15 Gi), the base model download (~15 Gi), the dataset, the
+  # final exported model (~12 Gi), and up to `save_total_limit` (5, fixed by the
+  # launcher) checkpoints of ~24 Gi each — a checkpoint carries fp32 optimizer state
+  # for every trainable parameter on top of the weights, so it is twice the model.
+  dataset_size_gi: 1
+  train_storage_gi: 180
+
+  # Base image; GR00T is installed into it at runtime by files/gr00t/install_n17.sh.
+  image: nvcr.io/nvidia/pytorch:25.04-py3
+
+  exec_timeout: 12h
+
+workflow:
+  name: so101-{{ model }}-finetune
+  resources:
+    train:
+      platform: "{{ train_platform }}"
+      gpu: {{ num_gpus }}
+      cpu: {{ train_cpu }}
+      memory: {{ train_memory_gi }}Gi
+      storage: {{ train_storage_gi + dataset_size_gi }}Gi
+  tasks:
+  - name: finetune
+    image: "{{ image }}"
+    resource: train
+    credentials:
+      huggingface_token:
+        HF_TOKEN: token
+    inputs:
+    - url: {{ dataset_url }}
+    # Per-run prefix so two experiments cannot overwrite each other, and so stages 03
+    # and 04 can pin an exact run.
+    outputs:
+    - url: {{ storage_url }}/checkpoints/{{ model }}/{{workflow_id}}/
+    files:
+    - localpath: files/gr00t/install_n17.sh
+      path: /tmp/install_n17.sh
+    - localpath: files/gr00t/so101_config.py
+      path: /tmp/so101_config.py
+    command: [bash, -c]
+    args:
+      - |
+        set -euo pipefail
+
+        # OSMO does not validate s3 output URLs at submit time, so without this a
+        # forgotten --set fails at upload, after the whole run.
+        case "{{ storage_url }}" in
+          *REPLACE-WITH-YOUR-DATASETS-BUCKET*)
+            echo "ERROR: pass --set storage_url=s3://<your-datasets-bucket>/so101-vla" >&2
+            exit 2 ;;
+        esac
+
+        # ffmpeg is required, not convenience: the base image ships none, and the video
+        # backend the training dataloader uses cannot decode a frame without it.
+        # Ubuntu 24.04's ffmpeg 6.x is inside that backend's supported 4-7 range.
+        # git-lfs is required too — see files/gr00t/install_n17.sh.
+        apt-get update -qq
+        apt-get install -y -qq git git-lfs ffmpeg
+
+        # Exports GROOT_DIR and puts the venv on PATH.
+        source /tmp/install_n17.sh
+
+        # Find the root by the file that must exist, rather than assuming nesting depth.
+        INFO="$(find {{input:0}} -name info.json -path '*/meta/*' | head -1)"
+        if [ -z "$INFO" ]; then
+          echo "ERROR: no meta/info.json under {{input:0}} — is {{ dataset_url }} a prepared dataset prefix?" >&2
+          find {{input:0}} -maxdepth 3 >&2
+          exit 1
+        fi
+        DS="$(dirname "$(dirname "$INFO")")"
+        echo "dataset root: ${DS}"
+
+        # Both are stage 01's job. Checking here turns a wrong --set into an immediate
+        # failure instead of a confusing one an hour into training.
+        if [ ! -f "${DS}/meta/modality.json" ]; then
+          echo "ERROR: ${DS}/meta/modality.json missing — run stage 01 with model={{ model }} first" >&2
+          exit 1
+        fi
+        DS_VERSION="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['codebase_version'])" "${DS}/meta/info.json")"
+        case "${DS_VERSION}" in
+          v2*) echo "codebase_version: ${DS_VERSION}" ;;
+          *)   echo "ERROR: this model needs a v2 dataset, found ${DS_VERSION} — run stage 01 first" >&2
+               exit 1 ;;
+        esac
+
+        # VRAM headroom is the number that decides whether global_batch_size can go up
+        # and whether one GPU is still enough after changing the tune flags. Sampled to
+        # the output prefix so it survives the pod.
+        nvidia-smi --query-gpu=timestamp,memory.used,memory.total,utilization.gpu \
+          --format=csv -l 60 > {{output}}/gpu_memory.csv 2>&1 &
+        SMI_PID=$!
+        trap 'kill "${SMI_PID}" 2>/dev/null || true' EXIT
+
+        # Everything in here is appended after the launcher's own arguments, so it
+        # overrides the values the launcher hard-codes.
+        EXTRA_ARGS=(--learning_rate {{ learning_rate }} --gradient_accumulation_steps {{ gradient_accumulation_steps }})
+        # `|string|lower` because --set delivers a string: a bare truth test would read
+        # "false" as true and silently unfreeze the tower.
+        EXTRA_ARGS+=({% if tune_visual|string|lower == 'true' %}--tune-visual{% else %}--no-tune-visual{% endif %})
+        EXTRA_ARGS+=({% if tune_llm|string|lower == 'true' %}--tune-llm{% else %}--no-tune-llm{% endif %})
+
+        # The wrapper, not launch_finetune.py directly: it carries the fixed
+        # hyperparameters and, more importantly, picks the right launcher for one GPU
+        # vs many — the single-GPU path deliberately avoids a data-parallel wrapper
+        # that crashes on this model.
+        #
+        # Weights & Biases is off because it would need a second credential and blocks
+        # startup on a network call; set USE_WANDB=1 and add a WANDB_API_KEY credential
+        # if you want run tracking.
+        cd "${GROOT_DIR}"
+        NUM_GPUS={{ num_gpus }} \
+        MAX_STEPS={{ max_steps }} \
+        SAVE_STEPS={{ save_steps }} \
+        GLOBAL_BATCH_SIZE={{ global_batch_size }} \
+        DATALOADER_NUM_WORKERS={{ dataloader_num_workers }} \
+        USE_WANDB=0 \
+          bash examples/finetune.sh \
+            --base-model-path nvidia/GR00T-N1.7-3B \
+            --dataset-path "${DS}" \
+            --modality-config-path /tmp/so101_config.py \
+            --embodiment-tag NEW_EMBODIMENT \
+            --output-dir {{output}} \
+            -- "${EXTRA_ARGS[@]}"
+
+        # A checkpoint without normalization statistics loads fine and then produces
+        # nonsense actions on hardware, which is expensive to diagnose on a real arm.
+        # Fail here instead.
+        if ! find {{output}} -name dataset_statistics.json | grep -q .; then
+          echo "ERROR: no dataset_statistics.json under the checkpoint — do not deploy this run" >&2
+          exit 1
+        fi
+
+        # Required, and the failure it prevents is silent. The task runs as root while
+        # the sidecar that uploads runs unprivileged, so anything written via tempfile
+        # is mode 0600 and unreadable to it. OSMO logs the per-file permission errors,
+        # then reports "All Outputs Uploaded" and marks the task COMPLETED — so without
+        # this, part of the checkpoint goes missing and nothing says so.
+        chmod -R a+rX {{output}}
+
+        echo "published to {{ storage_url }}/checkpoints/{{ model }}/{{workflow_id}}/"
+        ls -la {{output}}
+        du -sh {{output}}
+        # Check the published prefix against this count; see the chmod note above.
+        echo "files to upload: $(find {{output}} -type f | wc -l)"
+  timeout:
+    exec_timeout: {{ exec_timeout }}

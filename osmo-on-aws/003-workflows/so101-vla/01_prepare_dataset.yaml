@@ -18,8 +18,12 @@
 #
 #   osmo workflow submit osmo-on-aws/003-workflows/so101-vla/01_prepare_dataset.yaml \
 #     --set storage_url=s3://<bucket>/so101-vla \
-#     --set dataset_url=s3://<bucket>/so101-vla/raw/<name>/ \
-#     --set dataset_name=<name> --set dataset_size_gi=<size>
+#           dataset_url=s3://<bucket>/so101-vla/raw/<name>/ \
+#           dataset_name=<name> dataset_size_gi=<size>
+#
+# One `--set` takes every override. Repeating the flag is not an error and is not
+# additive — only the last group survives, and the run proceeds with the placeholder
+# defaults below.
 #
 # `localpath:` paths are resolved relative to this file, so that works from the repo
 # root with no `cd`.

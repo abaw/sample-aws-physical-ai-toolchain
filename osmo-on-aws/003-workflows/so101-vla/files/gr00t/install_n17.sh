@@ -43,6 +43,9 @@ if [ ! -d "${GROOT_DIR}/.git" ]; then
   echo "[install_n17] cloning Isaac-GR00T at ${GROOT_COMMIT}"
   git clone --quiet https://github.com/NVIDIA/Isaac-GR00T.git "${GROOT_DIR}"
   git -C "${GROOT_DIR}" checkout --quiet "${GROOT_COMMIT}"
+  # uv resolves a wheel tracked in LFS, so a pointer file left in its place fails
+  # `uv sync` with "Invalid zip file structure".
+  git -C "${GROOT_DIR}" lfs pull
 fi
 git -C "${GROOT_DIR}" log -1 --format='[install_n17] %H %ai %s'
 

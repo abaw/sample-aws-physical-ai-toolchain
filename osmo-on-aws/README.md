@@ -264,6 +264,12 @@ For more details on profile configuration, see the [OSMO Setup Profile documenta
 | `cosmos_transfer.yaml` | L40S | Full Isaac Sim → Cosmos Transfer2.5 SDG pipeline |
 | `cosmos_transfer_augmentation.yaml` | L40S | Prompt-driven video augmentation with Cosmos Transfer2.5 |
 | `pick_and_place_training.yaml` | Multi-GPU | Reference skeleton for a full pick-and-place pipeline |
+| [`so101-vla/`](003-workflows/so101-vla/README.md) | 1× L40S | **Multi-stage example** — fine-tune a VLA model on SO-101 recordings and evaluate it before it drives hardware |
+
+The single-file workflows above are each self-contained. `so101-vla/` is a three-stage pipeline —
+prepare a dataset, fine-tune GR00T N1.7, evaluate the checkpoint offline — and has its own
+[README](003-workflows/so101-vla/README.md) covering prerequisites, submit order, measured resource
+requirements, and how to read the evaluation result. It needs a Hugging Face token credential.
 
 ### Getting Started (Recommended Order)
 
@@ -297,7 +303,7 @@ osmo workflow submit 003-workflows/test_bucket_write.yaml
 
 ```bash
 osmo workflow list                    # List all workflows
-osmo workflow status <workflow-id>    # Check status of a specific run
+osmo workflow query <workflow-id>     # Check status of a specific run
 osmo workflow logs <workflow-id>      # View task logs
 ```
 
@@ -316,6 +322,9 @@ osmo-on-aws/
 │   ├── config/            # Central deployment-config.yaml + templates
 │   ├── manifests/         # Kubernetes manifests
 │   └── cleanup/           # Uninstall scripts
+├── 003-workflows/         # Example workflows
+│   └── so101-vla/         # Multi-stage SO-101 VLA example (see its README)
+│       └── files/         # Scripts injected into tasks at submit time
 └── docs/                  # Documentation
 ```
 
