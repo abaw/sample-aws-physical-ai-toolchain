@@ -139,9 +139,13 @@ services:
       max_exec_timeout: "30d"
 
     # Pod templates merged onto workflow task pods. default_ctrl/default_user
-    # come from chart defaults; we add gpu_tolerations for the l40s platform.
-    # gpu_tolerations also pins the workflow IRSA ServiceAccount so osmo-ctrl
-    # authenticates to S3 via the web-identity token (no static dataset keys).
+    # come from chart defaults; we add gpu_tolerations and shared_memory for the
+    # l40s platform. gpu_tolerations also pins the workflow IRSA ServiceAccount so
+    # osmo-ctrl authenticates to S3 via the web-identity token (no static dataset keys).
+    #
+    # Templates merge into the generated pod spec by list entry `name`, so adding one
+    # does not displace what the others contribute. They must not override image,
+    # command or args, and a change only affects workflows submitted after it.
     podTemplates:
       # Workaround for NVIDIA/OSMO#1067 (see docs/troubleshooting.md): skips
       # osmo-ctrl's broken S3 pre-flight check on the IRSA path. REMOVE once fixed.
@@ -172,6 +176,28 @@ services:
               effect: NoSchedule
           nodeSelector:
             nvidia.com/gpu.present: "true"
+      # A task pod otherwise gets Kubernetes' default 64 MB of /dev/shm, which any
+      # framework that passes tensors between processes exhausts immediately — PyTorch
+      # dataloader workers die at step 0 with a bus error.
+      #
+      # sizeLimit is deliberately modest. A memory-backed volume is capped at
+      # min(node allocatable, pod memory limit, sizeLimit) and its pages are charged to
+      # the writing container's memory limit, which default_user sets equal to the task's
+      # own request. So a large limit here does not buy headroom: it lets shared memory
+      # consume the whole task's memory budget, turning a clear bus error into an
+      # OOMKill of the task. Raise it in step with the task's memory request, if at all.
+      shared_memory:
+        spec:
+          containers:
+            - name: "{{USER_CONTAINER_NAME}}"
+              volumeMounts:
+                - name: shm
+                  mountPath: /dev/shm
+          volumes:
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 8Gi
 
     # Backend scheduler settings (KAI co-scheduling). Applied declaratively here (no separate configure step).
     backends:
@@ -203,8 +229,17 @@ services:
             privileged_allowed: false
             default_variables:
               USER_GPU: 1
+            # Per-platform rather than the pool's common_pod_template: only GPU training
+            # tasks need the shared-memory volume. A platform's overrides merge on top of
+            # the pool's common list, they do not replace it.
+            #
+            # Mounting /dev/shm here also makes it one of this platform's *derived*
+            # default mounts, which means a task naming it in volumeMounts is then
+            # rejected as already provided. That is the intended trade — the volume is
+            # per-pod, where a task-level host mount would share the node's.
             override_pod_template:
               - gpu_tolerations
+              - shared_memory
 
     # IdP role mapping (external_roles). Applied declaratively here (no separate configure step).
     # Policies are product defaults; we only map Keycloak groups 1:1.

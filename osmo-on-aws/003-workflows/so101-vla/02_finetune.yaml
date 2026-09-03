@@ -74,11 +74,15 @@ default-values:
   gradient_accumulation_steps: 1
   learning_rate: 1e-4
   # Each worker holds decoded video frames, so this trades host RAM for GPU idle time.
-  # Zero is not a performance choice: worker processes hand batches to the trainer
-  # through /dev/shm, and a task pod gets the Kubernetes default 64 MB, which is far too
-  # small for decoded frames — any positive value dies at step 0 with a bus error and
-  # "insufficient shared memory". Raise it only once the platform mounts a larger
-  # /dev/shm; the spec has no field for it.
+  # Zero because it measured no slower: on a dataset small enough to stay in the page
+  # cache the GPU is the bottleneck, so workers buy no throughput and cost process
+  # startup before the first step. Raise it when the dataset outgrows host RAM and
+  # decoding starts to starve the GPU — compare marginal step time, not the progress
+  # bar's average, which is dominated by startup on a short run.
+  #
+  # Workers need shared memory to hand batches to the trainer, far more than the 64 MB
+  # a pod gets by default; the platform must provide it (a `shared_memory` pod template)
+  # or any positive value here dies at step 0 with a bus error.
   dataloader_num_workers: 0
 
   # --- resources -------------------------------------------------------------

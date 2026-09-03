@@ -197,6 +197,7 @@ image, so the commit it pins is changed in one place. That file is injected by e
 | Input download fails with `NoSuchBucket` on `REPLACE-WITH-…` | Overrides split across repeated `--set` flags, so only the last applied | One `--set`, all pairs. Confirm with `--dry-run` |
 | `uv sync` fails: `Invalid zip file structure` | A wheel tracked in Git LFS was left as a pointer file | `git-lfs` must be installed in the task image; `install_n17.sh` fetches the content |
 | HTTP 403 downloading the model | The Hub account has not accepted the gated backbone repo's terms | Accept them; the token's scope is not the problem |
+| Bus error / "insufficient shared memory" at step 0 | `dataloader_num_workers > 0` with the default 64 MB `/dev/shm` | The platform must provide a `shared_memory` pod template — see `002-setup/values/` |
 | Pod evicted part-way through a run | `storage` under-requested | Raise `dataset_size_gi` / `train_storage_gi` |
 | Task COMPLETED but files missing in S3 | Output written unreadable to the uploading sidecar | Each stage chmods its output and prints a file count — compare it against the prefix |
 | `osmo workflow status` is not a command | It is `osmo workflow query` | — |
