@@ -223,13 +223,65 @@ workflow:
             --output-dir {{output}} \
             -- "${EXTRA_ARGS[@]}"
 
-        # A checkpoint without normalization statistics loads fine and then produces
-        # nonsense actions on hardware, which is expensive to diagnose on a real arm.
-        # Fail here instead.
-        if ! find {{output}} -name dataset_statistics.json | grep -q .; then
-          echo "ERROR: no dataset_statistics.json under the checkpoint — do not deploy this run" >&2
-          exit 1
-        fi
+        # Stop sampling before anything below reads the tree, so the sizes recorded in
+        # the manifests are final.
+        kill "${SMI_PID}" 2>/dev/null || true
+        trap - EXIT
+
+        # Each published directory gets a manifest of its own files and their sizes.
+        # OSMO's uploader logs per-file failures and then reports success anyway, and the
+        # task cannot check its own upload because the uploader runs after this container
+        # exits — so the manifest travels with the checkpoint and whoever downloads it can
+        # tell a complete one from a truncated one. Stage 03 does exactly that.
+        #
+        # Deferred exit status: publication has to finish first, or a failure here leaves
+        # nothing to diagnose it from.
+        MANIFEST_RC=0
+        python3 - {{output}} <<'PY' || MANIFEST_RC=$?
+        import json, pathlib, sys
+
+        out = pathlib.Path(sys.argv[1])
+        checkpoints = sorted(p for p in out.glob("checkpoint-*") if p.is_dir())
+
+        def files_under(root, skip):
+            found = []
+            for p in sorted(root.rglob("*")):
+                if not p.is_file() or p.name == "manifest.json":
+                    continue
+                if any(str(p).startswith(str(s) + "/") for s in skip):
+                    continue
+                found.append(dict(path=str(p.relative_to(root)), bytes=p.stat().st_size))
+            return found
+
+        # Asserted per artifact rather than once for the whole tree: the statistics are
+        # written at start-up, so "somewhere under the output" is true even for a run that
+        # saved no usable checkpoint, and a checkpoint loaded without them predicts at the
+        # wrong scale rather than failing.
+        incomplete = []
+        for root, skip in [(out, checkpoints)] + [(c, []) for c in checkpoints]:
+            name = str(root.relative_to(out)) if root != out else "(final export)"
+            if not (root / "experiment_cfg" / "dataset_statistics.json").is_file():
+                incomplete.append(name)
+            found = files_under(root, skip)
+            (root / "manifest.json").write_text(
+                json.dumps(
+                    dict(
+                        file_count=len(found),
+                        total_bytes=sum(f["bytes"] for f in found),
+                        files=found,
+                    ),
+                    indent=2,
+                )
+                + "\n"
+            )
+            print("manifest: %s — %d files, %d bytes"
+                  % (name, len(found), sum(f["bytes"] for f in found)))
+
+        if incomplete:
+            print("ERROR: no experiment_cfg/dataset_statistics.json in: %s"
+                  % ", ".join(incomplete), file=sys.stderr)
+            sys.exit(1)
+        PY
 
         # Required, and the failure it prevents is silent. The task runs as root while
         # the sidecar that uploads runs unprivileged, so anything written via tempfile
@@ -241,7 +293,10 @@ workflow:
         echo "published to {{ storage_url }}/checkpoints/{{ model }}/{{workflow_id}}/"
         ls -la {{output}}
         du -sh {{output}}
-        # Check the published prefix against this count; see the chmod note above.
-        echo "files to upload: $(find {{output}} -type f | wc -l)"
+
+        if [ "${MANIFEST_RC}" -ne 0 ]; then
+          echo "ERROR: incomplete checkpoint published — do not evaluate or deploy it" >&2
+          exit 1
+        fi
   timeout:
     exec_timeout: {{ exec_timeout }}

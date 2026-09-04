@@ -106,6 +106,11 @@ step rate: **a task killed by its timeout publishes nothing.**
 Checkpoints land under `$B/checkpoints/<model>/<workflow-id>/`, one prefix per run, so two experiments
 cannot overwrite each other and later stages can pin an exact run.
 
+Every published directory carries a `manifest.json` of its own files and their sizes. This exists because
+OSMO's uploader logs per-file failures and then reports success anyway, and the training task cannot check
+its own upload — the uploader runs after the task container exits. The manifest travels with the
+checkpoint, so stage 03 can tell a complete checkpoint from a truncated one before evaluating it.
+
 ### 3. Evaluate, before any hardware
 
 ```bash
@@ -132,10 +137,15 @@ is computed over. `metrics.json` records `requested_traj_ids`, `evaluated_traj_i
 flag for exactly that, and the task fails — after publishing everything — when they disagree:
 
 ```json
-{ "checkpoint": "checkpoint-10", "requested_traj_ids": [0, 1, 2],
+{ "checkpoint_url": "s3://<bucket>/so101-vla/checkpoints/gr00t-n17/<run-id>/checkpoint-10/",
+  "global_step": 10, "requested_traj_ids": [0, 1, 2],
   "evaluated_traj_ids": [0, 1, 2], "missing_traj_ids": [],
-  "average_mse": 1347.2, "average_mae": 30.0, "plot_count": 3, "complete": true }
+  "average_mse": 1344.6, "average_mae": 30.0, "plot_count": 3, "complete": true }
 ```
+
+The checkpoint is identified by its source URL and the step read from the checkpoint itself, not by a
+local path: inputs are downloaded into a numbered directory, which says nothing about which run produced
+them.
 
 Upstream's
 ["Interpreting the Result: Is My Fine-tune Working?"](https://github.com/NVIDIA/Isaac-GR00T) section is
@@ -213,7 +223,7 @@ image, so the commit it pins is changed in one place. That file is injected by e
 | HTTP 403 downloading the model | The Hub account has not accepted the gated backbone repo's terms | Accept them; the token's scope is not the problem |
 | Bus error / "insufficient shared memory" at step 0 | `dataloader_num_workers > 0` with the default 64 MB `/dev/shm` | The platform must provide a `shared_memory` pod template — see `002-setup/values/` |
 | Pod evicted part-way through a run | `storage` under-requested | Raise `dataset_size_gi` / `train_storage_gi` |
-| Task COMPLETED but files missing in S3 | Output written unreadable to the uploading sidecar | Each stage chmods its output and prints a file count — compare it against the prefix |
+| Task COMPLETED but files missing in S3 | Output written unreadable to the uploading sidecar | Stage 02 ships a `manifest.json` inside each checkpoint and stage 03 verifies the download against it — that is where truncation surfaces |
 | `osmo workflow status` is not a command | It is `osmo workflow query` | — |
 
 Data-access validation is not an existence check: OSMO reports success for a bucket that does not

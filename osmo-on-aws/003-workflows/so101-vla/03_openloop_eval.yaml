@@ -172,6 +172,41 @@ workflow:
           exit 1
         fi
 
+        # Upload is where a checkpoint silently loses files: OSMO logs per-file failures
+        # and still reports success, and the training task cannot check its own upload
+        # because the uploader runs after that container exits. So stage 02 ships a
+        # manifest inside each checkpoint, and this is the first moment it can be checked.
+        # Fails immediately rather than after the eval — nothing has been produced yet
+        # that a later failure would need to explain itself with.
+        python3 - "${CKPT}" <<'PY'
+        import json, pathlib, sys
+
+        ckpt = pathlib.Path(sys.argv[1])
+        manifest = ckpt / "manifest.json"
+        if not manifest.is_file():
+            print("WARNING: %s has no manifest.json — published before stage 02 wrote one, "
+                  "so upload completeness cannot be verified" % ckpt, file=sys.stderr)
+            sys.exit(0)
+
+        listed = json.loads(manifest.read_text())
+        missing, truncated = [], []
+        for entry in listed["files"]:
+            path = ckpt / entry["path"]
+            if not path.is_file():
+                missing.append(entry["path"])
+            elif path.stat().st_size != entry["bytes"]:
+                truncated.append(entry["path"])
+
+        if missing or truncated:
+            print("ERROR: checkpoint does not match its manifest — %d of %d files missing, "
+                  "%d wrong size. Missing: %s. Wrong size: %s"
+                  % (len(missing), listed["file_count"], len(truncated),
+                     missing[:10], truncated[:10]), file=sys.stderr)
+            sys.exit(1)
+        print("manifest verified: %d files, %d bytes"
+              % (listed["file_count"], listed["total_bytes"]))
+        PY
+
         mkdir -p {{output}}/plots
 
         # --save-plot-path is deliberately not passed: it names a single file, so with
