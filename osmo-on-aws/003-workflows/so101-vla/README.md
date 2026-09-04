@@ -123,7 +123,21 @@ Use episodes the fine-tune did not train on, and use several — one lucky traje
 
 ## Reading the result
 
-Stage 03 publishes one plot per trajectory, plus `metrics.txt` and the full run log. Upstream's
+Stage 03 publishes one plot per trajectory, `metrics.json`, `metrics.txt` and the full run log.
+
+**Gate on `metrics.json`, not on the task status alone.** The task succeeding means the eval ran; it does
+not mean the eval covered what you asked for. Trajectory IDs past the end of the dataset are skipped
+with a warning and the eval still exits successfully, so a typo silently shrinks the sample the average
+is computed over. `metrics.json` records `requested_traj_ids`, `evaluated_traj_ids` and a `complete`
+flag for exactly that, and the task fails — after publishing everything — when they disagree:
+
+```json
+{ "checkpoint": "checkpoint-10", "requested_traj_ids": [0, 1, 2],
+  "evaluated_traj_ids": [0, 1, 2], "missing_traj_ids": [],
+  "average_mse": 1347.2, "average_mae": 30.0, "plot_count": 3, "complete": true }
+```
+
+Upstream's
 ["Interpreting the Result: Is My Fine-tune Working?"](https://github.com/NVIDIA/Isaac-GR00T) section is
 the rubric; read the plots against it rather than inventing one.
 

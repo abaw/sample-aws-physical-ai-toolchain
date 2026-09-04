@@ -192,13 +192,86 @@ workflow:
           --denoising-steps {{ denoising_steps }} \
           --steps {{ steps }} 2>&1 | tee {{output}}/openloop_eval.log
 
-        cp "${PLOT_DIR}"/*.jpeg {{output}}/plots/
+        # Copy whatever plots exist instead of letting an unmatched glob fail the task.
+        # The numbers are the gate; the plots are how a human reads it.
+        cp "${PLOT_DIR}"/*.jpeg {{output}}/plots/ 2>/dev/null || true
 
-        # The per-trajectory and average errors only exist in the log. Pulled out so the
-        # go/no-go number is readable from the published prefix without reading it all.
-        grep -E "MSE for trajectory|Average MSE|Average MAE" \
-          {{output}}/openloop_eval.log > {{output}}/metrics.txt
-        cat {{output}}/metrics.txt
+        # The eval reports its errors only in the log, so both artifacts are parsed out
+        # of it: metrics.json for a caller, metrics.txt for a person.
+        #
+        # `complete` is the field to gate on, and it is not the same question as whether
+        # the task succeeded. Out-of-range trajectory IDs are skipped with a warning and
+        # the eval still exits 0, so a typo silently shrinks the sample it averages over,
+        # and every ID being out of range produces no metrics at all. Comparing
+        # requested against evaluated is what catches both.
+        METRICS_RC=0
+        python3 - {{output}} "{{ traj_ids }}" "{{ checkpoint_url }}" "${CKPT}" <<'PY' || METRICS_RC=$?
+        import json, pathlib, re, sys
+
+        out = pathlib.Path(sys.argv[1])
+        requested = [int(t) for t in sys.argv[2].split()]
+        log = (out / "openloop_eval.log").read_text(errors="replace")
+
+        # The source URL, not the local path: inputs are downloaded to a numbered
+        # directory, so the path says nothing about which run or step was scored. The
+        # step comes from the checkpoint itself, and is absent from a final export.
+        state = pathlib.Path(sys.argv[4]) / "trainer_state.json"
+        global_step = None
+        if state.is_file():
+            global_step = json.loads(state.read_text()).get("global_step")
+
+        def num(text):
+            try:
+                return float(text)
+            except ValueError:
+                return None
+
+        # Last occurrence wins, so a re-run of a trajectory within one log is not double
+        # counted.
+        per_traj = {}
+        for tid, mse, mae in re.findall(
+            r"MSE for trajectory (\d+): (\S+?), MAE: (\S+)", log
+        ):
+            per_traj[int(tid)] = dict(traj_id=int(tid), mse=num(mse), mae=num(mae.rstrip(",")))
+
+        def avg(label):
+            m = re.search(r"Average %s across all trajs: (\S+)" % label, log)
+            return num(m.group(1)) if m else None
+
+        evaluated = sorted(t for t, v in per_traj.items() if v["mse"] is not None)
+        missing = [t for t in requested if t not in evaluated]
+        result = dict(
+            checkpoint_url=sys.argv[3],
+            global_step=global_step,
+            requested_traj_ids=requested,
+            evaluated_traj_ids=evaluated,
+            missing_traj_ids=missing,
+            per_trajectory=[per_traj[t] for t in evaluated],
+            average_mse=avg("MSE"),
+            average_mae=avg("MAE"),
+            plot_count=len(list((out / "plots").glob("*.jpeg"))),
+            complete=not missing and avg("MSE") is not None,
+        )
+        (out / "metrics.json").write_text(json.dumps(result, indent=2) + "\n")
+
+        lines = [
+            "checkpoint: %s (step %s)" % (result["checkpoint_url"], global_step),
+            "trajectories requested: %s" % requested,
+            "trajectories evaluated: %s" % evaluated,
+        ]
+        lines += ["traj %d: MSE %s, MAE %s" % (t["traj_id"], t["mse"], t["mae"])
+                  for t in result["per_trajectory"]]
+        lines += ["average MSE: %s" % result["average_mse"],
+                  "average MAE: %s" % result["average_mae"]]
+        (out / "metrics.txt").write_text("\n".join(lines) + "\n")
+        print("\n".join(lines))
+
+        if not result["complete"]:
+            print("INCOMPLETE: requested %s, evaluated %s — trajectory IDs out of range "
+                  "for this dataset, or the eval reported no averages"
+                  % (requested, evaluated), file=sys.stderr)
+            sys.exit(1)
+        PY
 
         # Required, and the failure it prevents is silent. The task runs as root while
         # the sidecar that uploads runs unprivileged, so anything written via tempfile
@@ -211,5 +284,13 @@ workflow:
         ls -la {{output}} {{output}}/plots
         # Check the published prefix against this count; see the chmod note above.
         echo "files to upload: $(find {{output}} -type f | wc -l)"
+
+        # Deliberately last: an incomplete evaluation must fail the task, but only after
+        # the log, the plots and metrics.json are published and readable — otherwise
+        # there is nothing to diagnose it from.
+        if [ "${METRICS_RC}" -ne 0 ]; then
+          echo "ERROR: evaluation did not cover every requested trajectory; see metrics.json" >&2
+          exit 1
+        fi
   timeout:
     exec_timeout: {{ exec_timeout }}
