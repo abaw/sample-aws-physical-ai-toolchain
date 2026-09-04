@@ -117,11 +117,12 @@ workflow:
       - |
         set -euo pipefail
 
-        # OSMO does not validate s3 output URLs at submit time, so without this a
-        # forgotten --set fails at upload, after the whole run.
-        case "{{ storage_url }}{{ checkpoint_url }}" in
+        # Output URLs are not validated at submit time, so without this a forgotten
+        # --set fails at upload, after the whole run. checkpoint_url needs no guard: it
+        # is an input, so a placeholder fails at download before this script runs.
+        case "{{ storage_url }}" in
           *REPLACE-WITH-*)
-            echo "ERROR: pass --set storage_url=... and --set checkpoint_url=..." >&2
+            echo "ERROR: pass --set storage_url=s3://<your-datasets-bucket>/so101-vla" >&2
             exit 2 ;;
         esac
 
@@ -135,7 +136,7 @@ workflow:
         source /tmp/install_n17.sh
 
         # Find the root by the file that must exist, rather than assuming nesting depth.
-        INFO="$(find {{input:0}} -name info.json -path '*/meta/*' | head -1)"
+        INFO="$(find {{input:0}} -name info.json -path '*/meta/*' -print -quit)"
         if [ -z "$INFO" ]; then
           echo "ERROR: no meta/info.json under {{input:0}} — is {{ dataset_url }} a prepared dataset prefix?" >&2
           find {{input:0}} -maxdepth 3 >&2
@@ -145,7 +146,7 @@ workflow:
         echo "dataset root: ${DS}"
 
 {% if checkpoint_step %}
-        CKPT="$(find {{input:1}} -type d -name 'checkpoint-{{ checkpoint_step }}' | head -1)"
+        CKPT="$(find {{input:1}} -type d -name 'checkpoint-{{ checkpoint_step }}' -print -quit)"
 {% else %}
         # A single checkpoint prefix is already a model directory. A whole run prefix is
         # not: it holds the checkpoints as subdirectories, and -V is what sorts
