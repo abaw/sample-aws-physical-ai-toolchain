@@ -14,33 +14,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # so101-vla stage 03 — replay held-out trajectories through a fine-tuned checkpoint and
-# compare predicted actions against ground truth, offline. This is the stop/go gate for
-# stage 04: it is the last chance to catch a bad policy before one drives a real arm.
+# compare predicted actions against ground truth, offline. This is the stop/go gate
+# before a policy drives a real arm.
 #
-#   osmo workflow submit osmo-on-aws/003-workflows/so101-vla/03_openloop_eval.yaml \
-#     --set storage_url=s3://<bucket>/so101-vla \
-#           dataset_url=s3://<bucket>/so101-vla/dataset/<name>/ \
-#           checkpoint_url=s3://<bucket>/so101-vla/checkpoints/gr00t-n17/<run-id>/checkpoint-<step>/
-#
-# One `--set` takes every override. Repeating the flag is not an error and is not
-# additive — only the last group survives, and the run proceeds with the placeholder
-# defaults below.
-#
-# Three failure modes present identically on hardware — as "the arm moves wrongly" —
-# and this stage separates them cheaply:
-#
-#   * a modality or joint-order mistake: the prediction tracks the wrong channel;
-#   * missing normalization statistics: predictions come out at the wrong scale;
-#   * under-training: predictions simply do not track ground truth.
-#
-# Upstream's "Interpreting the Result: Is My Fine-tune Working?" section explains how to
-# read the plots; use it rather than inventing a rubric. Evaluate several held-out
-# trajectories — one lucky trajectory is not convergence.
-#
-# Needs the same `HF_TOKEN` credential as stage 02: the checkpoint carries the action
-# head, but the VLM processor is still fetched from a gated Hub repo at load time.
-#
-# One GPU is plenty — this is inference on one 3B model, not training.
+# How to submit it, and how to read the plots and metrics.json: README.md in this
+# directory. Requires an `HF_TOKEN` credential, as stage 02 does — the checkpoint
+# carries the action head, but the VLM processor is still fetched at load time.
 
 default-values:
   model: gr00t-n17
@@ -126,9 +105,8 @@ workflow:
             exit 2 ;;
         esac
 
-        # ffmpeg is required, not convenience: the base image ships none, and the video
-        # backend this eval reads frames through cannot decode without it. git-lfs is
-        # required too — see files/gr00t/install_n17.sh.
+        # The base image ships no ffmpeg and the video backend cannot decode without one.
+        # git-lfs is needed too — see files/gr00t/install_n17.sh.
         apt-get update -qq
         apt-get install -y -qq git git-lfs ffmpeg
 
@@ -148,10 +126,9 @@ workflow:
 {% if checkpoint_step %}
         CKPT="$(find {{input:1}} -type d -name 'checkpoint-{{ checkpoint_step }}' -print -quit)"
 {% else %}
-        # A single checkpoint prefix is already a model directory. A whole run prefix is
-        # not: it holds the checkpoints as subdirectories, and -V is what sorts
-        # checkpoint-900 before checkpoint-1000, which a plain lexical sort gets
-        # backwards.
+        # A single checkpoint prefix is already a model directory; a run prefix holds them
+        # as subdirectories. -V because a lexical sort puts checkpoint-900 after
+        # checkpoint-1000.
         if [ -f "{{input:1}}/config.json" ]; then
           CKPT="{{input:1}}"
         else
@@ -173,12 +150,10 @@ workflow:
           exit 1
         fi
 
-        # Upload is where a checkpoint silently loses files: OSMO logs per-file failures
-        # and still reports success, and the training task cannot check its own upload
-        # because the uploader runs after that container exits. So stage 02 ships a
-        # manifest inside each checkpoint, and this is the first moment it can be checked.
-        # Fails immediately rather than after the eval — nothing has been produced yet
-        # that a later failure would need to explain itself with.
+        # Upload is where a checkpoint silently loses files, and stage 02 cannot check its
+        # own upload, so it ships a manifest inside each checkpoint. This is the first
+        # moment it can be verified. Fails immediately: nothing has been produced yet that
+        # a later failure would need to explain itself with.
         python3 - "${CKPT}" <<'PY'
         import json, pathlib, sys
 
@@ -210,10 +185,8 @@ workflow:
 
         mkdir -p {{output}}/plots
 
-        # --save-plot-path is deliberately not passed: it names a single file, so with
-        # several trajectories each would overwrite the last. Left unset, the eval
-        # writes one plot per trajectory under its own directory, which is then
-        # published whole.
+        # --save-plot-path names a single file, so several trajectories would overwrite
+        # each other. Left unset, the eval writes one plot per trajectory here.
         PLOT_DIR=/tmp/open_loop_eval
         rm -rf "${PLOT_DIR}"
 
@@ -232,14 +205,12 @@ workflow:
         # The numbers are the gate; the plots are how a human reads it.
         cp "${PLOT_DIR}"/*.jpeg {{output}}/plots/ 2>/dev/null || true
 
-        # The eval reports its errors only in the log, so both artifacts are parsed out
-        # of it: metrics.json for a caller, metrics.txt for a person.
+        # Errors are reported only in the log, so both artifacts are parsed out of it:
+        # metrics.json for a caller, metrics.txt for a person.
         #
-        # `complete` is the field to gate on, and it is not the same question as whether
-        # the task succeeded. Out-of-range trajectory IDs are skipped with a warning and
-        # the eval still exits 0, so a typo silently shrinks the sample it averages over,
-        # and every ID being out of range produces no metrics at all. Comparing
-        # requested against evaluated is what catches both.
+        # Gate on `complete`, which is not the same question as whether the task
+        # succeeded: out-of-range trajectory IDs are skipped with a warning and the eval
+        # still exits 0, so a typo silently shrinks the sample it averages over.
         METRICS_RC=0
         python3 - {{output}} "{{ traj_ids }}" "{{ checkpoint_url }}" "${CKPT}" <<'PY' || METRICS_RC=$?
         import json, pathlib, re, sys
@@ -309,11 +280,9 @@ workflow:
             sys.exit(1)
         PY
 
-        # Required, and the failure it prevents is silent. The task runs as root while
-        # the sidecar that uploads runs unprivileged, so anything written via tempfile
-        # is mode 0600 and unreadable to it. OSMO logs the per-file permission errors,
-        # then reports "All Outputs Uploaded" and marks the task COMPLETED — so without
-        # this, plots go missing and nothing says so.
+        # The task runs as root, the uploading sidecar does not, so anything written via
+        # tempfile is mode 0600 and silently unreadable to it — logged as a per-file error,
+        # then reported as uploaded.
         chmod -R a+rX {{output}}
 
         echo "published to {{ storage_url }}/openloop/{{ model }}/{{workflow_id}}/"

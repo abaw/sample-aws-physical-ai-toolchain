@@ -14,35 +14,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # so101-vla stage 02 — fine-tune GR00T N1.7 on the dataset stage 01 published, and
-# publish the checkpoints to a per-run S3 prefix that stages 03 and 04 read.
+# publish the checkpoints to a per-run S3 prefix that stage 03 reads.
 #
-#   osmo workflow submit osmo-on-aws/003-workflows/so101-vla/02_finetune.yaml \
-#     --set storage_url=s3://<bucket>/so101-vla \
-#           dataset_url=s3://<bucket>/so101-vla/dataset/<name>/ \
-#           dataset_size_gi=<size>
+# Prerequisites, how to submit it, and how to size it: README.md in this directory.
+# Requires an `HF_TOKEN` credential.
 #
-# One `--set` takes every override. Repeating the flag is not an error and is not
-# additive — only the last group survives, and the run proceeds with the placeholder
-# defaults below.
-#
-# Smoke-test it first with `--set max_steps=10 save_steps=10 exec_timeout=1h`: that
-# exercises the whole path — model download, dataset load, optimizer step, checkpoint
-# upload — in a few minutes instead of hours, and leaves a real checkpoint for stage 03
-# to be tested against.
-#
-# Requires an `HF_TOKEN` credential:
-#
-#   osmo credential set huggingface_token --type GENERIC \
-#     --payload-file token=<path-to-file-holding-the-token>
-#
-# The base model is public, but its VLM backbone and processor are pulled from a
-# separate *gated* repo, so an anonymous run dies at model construction. The Hub
-# account behind the token must have accepted that repo's terms.
-#
-# Wall clock is dominated by `max_steps`; the ~3 minutes of toolchain install and the
-# base-model download are fixed overhead. Budget `exec_timeout` from a smoke run's
-# steps/second rather than guessing, and remember a task killed by the timeout
-# publishes nothing.
+# A task killed by exec_timeout publishes nothing, so budget it from a smoke run's
+# step rate rather than guessing.
 
 default-values:
   # Only gr00t-n17 is implemented. It names the checkpoint prefix as well, so a second
@@ -53,17 +31,9 @@ default-values:
   dataset_url: s3://REPLACE-WITH-YOUR-DATASETS-BUCKET/so101-vla/dataset/so101-sample/
   storage_url: s3://REPLACE-WITH-YOUR-DATASETS-BUCKET/so101-vla
 
-  # --- what actually decides how many GPUs this needs -------------------------
-  # Trainable parameters, and therefore the optimizer state that dominates VRAM, are
-  # set by these two. With both off — the upstream default, and upstream's own SO-101
-  # recipe — the projector and the diffusion action head still amount to roughly half
-  # the model, and peak at about 90% of one 48 GB card at the batch size below. That
-  # fits, but leaves no room: raising global_batch_size, or turning either flag on to
-  # unfreeze a tower, needs a multi-GPU node, where the trainer shards optimizer state
-  # automatically.
-  #
-  # The trainer logs `Trainable parameters` at startup: check it against what you
-  # intended before letting a long run proceed.
+  # Unfreezing either tower needs a multi-GPU node: with both frozen the run already
+  # peaks near 90% of one 48 GB card at the batch size below. The launcher logs
+  # `Trainable parameters` at startup — check it before letting a long run proceed.
   tune_visual: false
   tune_llm: false
 
@@ -73,16 +43,10 @@ default-values:
   global_batch_size: 32
   gradient_accumulation_steps: 1
   learning_rate: 1e-4
-  # Each worker holds decoded video frames, so this trades host RAM for GPU idle time.
-  # Zero because it measured no slower: on a dataset small enough to stay in the page
-  # cache the GPU is the bottleneck, so workers buy no throughput and cost process
-  # startup before the first step. Raise it when the dataset outgrows host RAM and
-  # decoding starts to starve the GPU — compare marginal step time, not the progress
-  # bar's average, which is dominated by startup on a short run.
-  #
-  # Workers need shared memory to hand batches to the trainer, far more than the 64 MB
-  # a pod gets by default; the platform must provide it (a `shared_memory` pod template)
-  # or any positive value here dies at step 0 with a bus error.
+  # Any value above 0 needs the platform to provide shared memory (a `shared_memory`
+  # pod template); with the 64 MB a pod gets by default it dies at step 0 with a bus
+  # error. Measured no faster than 0 on a dataset that fits the page cache, where the
+  # GPU is the bottleneck — worth raising only once decoding starts starving it.
   dataloader_num_workers: 0
 
   # --- resources -------------------------------------------------------------
@@ -98,11 +62,9 @@ default-values:
   train_memory_gi: 48
 
   # `storage` is scheduled: under-request and kubelet evicts the pod mid-run,
-  # over-request and the submit is rejected for exceeding the node. It has to cover
-  # the toolchain venv (~15 Gi), the base model download (~15 Gi), the dataset, the
-  # final exported model (~12 Gi), and up to `save_total_limit` (5, fixed by the
-  # launcher) checkpoints of ~24 Gi each — a checkpoint carries fp32 optimizer state
-  # for every trainable parameter on top of the weights, so it is twice the model.
+  # over-request and the submit is rejected for exceeding the node. Covers the toolchain
+  # venv (~15 Gi), the base model (~15 Gi), the dataset, the final export (~12 Gi), and
+  # `save_total_limit` (5, fixed by the launcher) checkpoints of ~24 Gi each.
   dataset_size_gi: 1
   train_storage_gi: 180
 
@@ -151,10 +113,8 @@ workflow:
             exit 2 ;;
         esac
 
-        # ffmpeg is required, not convenience: the base image ships none, and the video
-        # backend the training dataloader uses cannot decode a frame without it.
-        # Ubuntu 24.04's ffmpeg 6.x is inside that backend's supported 4-7 range.
-        # git-lfs is required too — see files/gr00t/install_n17.sh.
+        # The base image ships no ffmpeg and the video backend cannot decode without one
+        # in the 4-7 range. git-lfs is needed too — see files/gr00t/install_n17.sh.
         apt-get update -qq
         apt-get install -y -qq git git-lfs ffmpeg
 
@@ -200,14 +160,10 @@ workflow:
         EXTRA_ARGS+=({% if tune_visual|string|lower == 'true' %}--tune-visual{% else %}--no-tune-visual{% endif %})
         EXTRA_ARGS+=({% if tune_llm|string|lower == 'true' %}--tune-llm{% else %}--no-tune-llm{% endif %})
 
-        # The wrapper, not launch_finetune.py directly: it carries the fixed
-        # hyperparameters and, more importantly, picks the right launcher for one GPU
-        # vs many — the single-GPU path deliberately avoids a data-parallel wrapper
-        # that crashes on this model.
-        #
-        # Weights & Biases is off because it would need a second credential and blocks
-        # startup on a network call; set USE_WANDB=1 and add a WANDB_API_KEY credential
-        # if you want run tracking.
+        # The wrapper rather than launch_finetune.py: it picks the launcher for one GPU
+        # vs many, and the single-GPU path avoids a data-parallel wrapper that crashes on
+        # this model. USE_WANDB=1 needs a WANDB_API_KEY credential, and blocks startup on
+        # a network call without one.
         cd "${GROOT_DIR}"
         NUM_GPUS={{ num_gpus }} \
         MAX_STEPS={{ max_steps }} \
@@ -228,14 +184,11 @@ workflow:
         kill "${SMI_PID}" 2>/dev/null || true
         trap - EXIT
 
-        # Each published directory gets a manifest of its own files and their sizes.
-        # OSMO's uploader logs per-file failures and then reports success anyway, and the
-        # task cannot check its own upload because the uploader runs after this container
-        # exits — so the manifest travels with the checkpoint and whoever downloads it can
-        # tell a complete one from a truncated one. Stage 03 does exactly that.
-        #
-        # Deferred exit status: publication has to finish first, or a failure here leaves
-        # nothing to diagnose it from.
+        # A manifest per published directory, because the uploader logs per-file failures
+        # and still reports success, and this task cannot check its own upload — the
+        # uploader runs after the container exits. Stage 03 verifies the download against
+        # it. Exit status is deferred until after publication, or a failure here would
+        # leave nothing to diagnose it from.
         MANIFEST_RC=0
         python3 - {{output}} <<'PY' || MANIFEST_RC=$?
         import json, pathlib, sys
@@ -283,11 +236,9 @@ workflow:
             sys.exit(1)
         PY
 
-        # Required, and the failure it prevents is silent. The task runs as root while
-        # the sidecar that uploads runs unprivileged, so anything written via tempfile
-        # is mode 0600 and unreadable to it. OSMO logs the per-file permission errors,
-        # then reports "All Outputs Uploaded" and marks the task COMPLETED — so without
-        # this, part of the checkpoint goes missing and nothing says so.
+        # The task runs as root, the uploading sidecar does not, so anything written via
+        # tempfile is mode 0600 and silently unreadable to it — logged as a per-file error,
+        # then reported as uploaded.
         chmod -R a+rX {{output}}
 
         echo "published to {{ storage_url }}/checkpoints/{{ model }}/{{workflow_id}}/"
