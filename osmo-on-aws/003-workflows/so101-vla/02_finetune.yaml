@@ -32,7 +32,7 @@ default-values:
   storage_url: s3://REPLACE-WITH-YOUR-DATASETS-BUCKET/so101-vla
 
   # Unfreezing either tower needs a multi-GPU node: with both frozen the run already
-  # peaks near 90% of one 48 GB card at the batch size below. The launcher logs
+  # fills most of one 48 GB card at the batch size below. The launcher logs
   # `Trainable parameters` at startup — check it before letting a long run proceed.
   tune_visual: false
   tune_llm: false
@@ -144,14 +144,6 @@ workflow:
                exit 1 ;;
         esac
 
-        # VRAM headroom is the number that decides whether global_batch_size can go up
-        # and whether one GPU is still enough after changing the tune flags. Sampled to
-        # the output prefix so it survives the pod.
-        nvidia-smi --query-gpu=timestamp,memory.used,memory.total,utilization.gpu \
-          --format=csv -l 60 > {{output}}/gpu_memory.csv 2>&1 &
-        SMI_PID=$!
-        trap 'kill "${SMI_PID}" 2>/dev/null || true' EXIT
-
         # Everything in here is appended after the launcher's own arguments, so it
         # overrides the values the launcher hard-codes.
         EXTRA_ARGS=(--learning_rate {{ learning_rate }} --gradient_accumulation_steps {{ gradient_accumulation_steps }})
@@ -178,11 +170,6 @@ workflow:
             --embodiment-tag NEW_EMBODIMENT \
             --output-dir {{output}} \
             -- "${EXTRA_ARGS[@]}"
-
-        # Stop sampling before anything below reads the tree, so the sizes recorded in
-        # the manifests are final.
-        kill "${SMI_PID}" 2>/dev/null || true
-        trap - EXIT
 
         # A manifest per published directory, because the uploader logs per-file failures
         # and still reports success, and this task cannot check its own upload — the

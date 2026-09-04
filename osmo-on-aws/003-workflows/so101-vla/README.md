@@ -181,14 +181,26 @@ because it carries fp32 optimizer state for every trainable parameter.
 | | |
 |---|---|
 | Trainable parameters | 1,620,515,968 (51.5% of the model) |
-| Peak VRAM at `global_batch_size: 32` | ~41.4 GiB of ~45 GiB (**~90%**) |
 | Step time, steady state | ~1.0 s/step |
 | Checkpoint size | ~24 GiB |
 
 It fits one card because the visual tower and the language backbone stay frozen — the upstream default,
-and what upstream's own SO-101 recipe uses. There is no headroom: raising `global_batch_size`, or setting
-`tune_visual` or `tune_llm`, needs a multi-GPU node, where the trainer shards optimizer state
-automatically. The launcher logs `Trainable parameters` at startup; check it against what you intended
+and what upstream's own SO-101 recipe uses. It fits without much to spare: raising `global_batch_size`,
+or setting `tune_visual` or `tune_llm`, needs a multi-GPU node, where the trainer shards optimizer state
+automatically.
+
+To watch GPU memory while a run is in flight, query the cluster's DCGM exporter rather than instrumenting
+the workflow — `DCGM_FI_DEV_FB_USED` is labelled by pod and container, so it attributes memory to the task
+that is using it:
+
+```bash
+kubectl -n gpu-operator port-forward svc/nvidia-dcgm-exporter 9400:9400
+curl -s localhost:9400/metrics | grep DCGM_FI_DEV_FB_USED
+```
+
+Note this is a live gauge with no retention here, so it answers "how much headroom right now", not "what
+did last week's run peak at". A true per-process peak would need GPU accounting mode enabled on the node,
+which a workflow cannot set. The launcher logs `Trainable parameters` at startup; check it against what you intended
 before letting a long run proceed.
 
 For cost, multiply your GPU node's hourly price by the wall clock in the table at the top. Nothing here
