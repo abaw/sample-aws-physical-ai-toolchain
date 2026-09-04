@@ -64,9 +64,11 @@ default-values:
   # `storage` is scheduled: under-request and kubelet evicts the pod mid-run,
   # over-request and the submit is rejected for exceeding the node. Covers the toolchain
   # venv (~15 Gi), the base model (~15 Gi), the dataset, the final export (~12 Gi), and
-  # `save_total_limit` (5, fixed by the launcher) checkpoints of ~24 Gi each.
+  # checkpoints of ~24 Gi each. Budget for `save_total_limit` + 1 of those (6, the limit
+  # being fixed by the launcher): rotation deletes the oldest only *after* writing the
+  # newest, so peak usage is one checkpoint above the limit.
   dataset_size_gi: 1
-  train_storage_gi: 180
+  train_storage_gi: 200
 
   # Base image; GR00T is installed into it at runtime by files/gr00t/install_n17.sh.
   image: nvcr.io/nvidia/pytorch:25.04-py3

@@ -173,8 +173,10 @@ over-request it and the submit is rejected for exceeding the node. So the size o
 input, not something the workflow can discover — `dataset_size_gi` on every stage.
 
 Stage 02's default `storage` budgets for the toolchain (~15 GiB), the base model (~15 GiB), the final
-export (~12 GiB) and five retained checkpoints. **A checkpoint is ~24 GiB** — roughly twice the model —
-because it carries fp32 optimizer state for every trainable parameter.
+export (~12 GiB) and six checkpoints. **A checkpoint is ~24 GiB** — roughly twice the model — because it
+carries fp32 optimizer state for every trainable parameter. Six, not the five that are retained: the
+launcher deletes the oldest checkpoint only after writing the newest, so peak usage is one above the
+limit, and that transient is what evicts a long run that budgeted for five.
 
 ## Measured on one 48 GB GPU
 
