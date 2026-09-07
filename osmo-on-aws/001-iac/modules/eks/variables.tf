@@ -57,6 +57,35 @@ variable "eks_admin_principal_arns" {
   type        = list(string)
 }
 
+variable "cluster_service_ipv4_cidr" {
+  description = "CIDR the cluster assigns Service IPs from. Create-only: any value other than the one an existing cluster already reports plans a cluster replacement."
+  type        = string
+}
+
+#------------------------------------------------------------------------------
+# Hybrid Nodes
+#------------------------------------------------------------------------------
+
+variable "deploy_hybrid_nodes" {
+  description = "Declare remote node/pod networks on the cluster for on-premise nodes"
+  type        = bool
+}
+
+variable "hybrid_node_cidrs" {
+  description = "RemoteNodeNetwork: addresses hybrid nodes register with"
+  type        = list(string)
+}
+
+variable "hybrid_pod_cidrs" {
+  description = "RemotePodNetwork: pod addresses on hybrid nodes"
+  type        = list(string)
+}
+
+variable "hybrid_policy_server_port" {
+  description = "TCP port hybrid-node pods use to reach a policy-server pod on a cloud node"
+  type        = number
+}
+
 #------------------------------------------------------------------------------
 # System Node Group Configuration
 #------------------------------------------------------------------------------

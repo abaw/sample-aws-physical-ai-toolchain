@@ -15,3 +15,30 @@ resource "terraform_data" "name_prefix_length_guard" {
     }
   }
 }
+
+# Guardrails for the hybrid node/pod networks.
+#
+# EKS accepts a remote network configuration that collides with the VPC or the
+# service CIDR and only then fails to route, so catch it here. Checked
+# unconditionally: the CIDRs are also what a later enable has to live with, and
+# the service CIDR is create-only.
+resource "terraform_data" "hybrid_network_guard" {
+  lifecycle {
+    precondition {
+      condition     = length(local.hybrid_cidrs_outside_private_space) == 0
+      error_message = "hybrid_node_cidrs / hybrid_pod_cidrs must be inside RFC-1918 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) or CGNAT (100.64.0.0/10) space, which AWS requires for remote node and pod networks. Outside that space: ${join(", ", local.hybrid_cidrs_outside_private_space)}."
+    }
+    precondition {
+      condition     = length(local.hybrid_cidrs_overlapping_cluster) == 0
+      error_message = "hybrid_node_cidrs / hybrid_pod_cidrs must not overlap vpc_cidr (${var.vpc_cidr}) or cluster_service_ipv4_cidr (${var.cluster_service_ipv4_cidr}): ${join("; ", local.hybrid_cidrs_overlapping_cluster)}."
+    }
+    precondition {
+      condition     = length(local.hybrid_cidrs_overlapping_hybrid) == 0
+      error_message = "hybrid_node_cidrs and hybrid_pod_cidrs must not overlap each other: ${join("; ", local.hybrid_cidrs_overlapping_hybrid)}."
+    }
+    precondition {
+      condition     = !local.deploy_hybrid_nodes || var.hybrid_vpn_gateway_target != ""
+      error_message = "should_deploy_hybrid_nodes = true needs somewhere to route the hybrid CIDRs. Set hybrid_vpn_gateway_target to an existing vgw-/tgw-/pcx-/eni- id."
+    }
+  }
+}

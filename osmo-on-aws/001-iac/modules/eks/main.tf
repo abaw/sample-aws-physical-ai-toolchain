@@ -26,6 +26,16 @@ module "eks" {
   cluster_endpoint_public_access  = var.cluster_endpoint_public_access
   cluster_endpoint_private_access = var.cluster_endpoint_private_access
 
+  cluster_service_ipv4_cidr = var.cluster_service_ipv4_cidr
+
+  # Remote networks for EKS Hybrid Nodes. EKS derives the inbound cluster
+  # security-group rules for these CIDRs itself; the node security group is
+  # left to us (see node_security_group_additional_rules below).
+  cluster_remote_network_config = var.deploy_hybrid_nodes ? {
+    remote_node_networks = { cidrs = var.hybrid_node_cidrs }
+    remote_pod_networks  = { cidrs = var.hybrid_pod_cidrs }
+  } : {}
+
   # Use the shared platform KMS key instead of creating a module-managed one.
   # Avoids MalformedPolicyDocumentException when the module's auto-generated
   # key policy references IAM principals that don't exist yet.
@@ -69,24 +79,47 @@ module "eks" {
   }
 
   # Node security group configuration
-  node_security_group_additional_rules = {
-    ingress_self_all = {
-      description = "Node to node all ports/protocols"
-      protocol    = "-1"
-      from_port   = 0
-      to_port     = 0
-      type        = "ingress"
-      self        = true
-    }
-    egress_all = {
-      description = "Node all egress"
-      protocol    = "-1"
-      from_port   = 0
-      to_port     = 0
-      type        = "egress"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-  }
+  node_security_group_additional_rules = merge(
+    {
+      ingress_self_all = {
+        description = "Node to node all ports/protocols"
+        protocol    = "-1"
+        from_port   = 0
+        to_port     = 0
+        type        = "ingress"
+        self        = true
+      }
+      egress_all = {
+        description = "Node all egress"
+        protocol    = "-1"
+        from_port   = 0
+        to_port     = 0
+        type        = "egress"
+        cidr_blocks = ["0.0.0.0/0"]
+      }
+    },
+    # Both hybrid CIDRs, not just the pod one: a CNI that masquerades pod egress
+    # to the node address (Cilium's default) makes this traffic arrive sourced
+    # from the node CIDR instead.
+    var.deploy_hybrid_nodes ? {
+      ingress_hybrid_policy_server = {
+        description = "Hybrid-node pods to a policy server on a cloud node"
+        protocol    = "tcp"
+        from_port   = var.hybrid_policy_server_port
+        to_port     = var.hybrid_policy_server_port
+        type        = "ingress"
+        cidr_blocks = concat(var.hybrid_node_cidrs, var.hybrid_pod_cidrs)
+      }
+      ingress_hybrid_icmp = {
+        description = "Hybrid node reachability checks"
+        protocol    = "icmp"
+        from_port   = -1
+        to_port     = -1
+        type        = "ingress"
+        cidr_blocks = concat(var.hybrid_node_cidrs, var.hybrid_pod_cidrs)
+      }
+    } : {}
+  )
 
   # Cluster addons — versions pinned (not most_recent) so apply is idempotent.
   # To bump: aws eks describe-addon-versions --kubernetes-version 1.35 --addon-name <name>

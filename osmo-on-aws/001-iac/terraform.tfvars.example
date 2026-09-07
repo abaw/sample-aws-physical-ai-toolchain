@@ -72,6 +72,23 @@ eks_admin_principal_arns = [
 # gpu_node_volume_size    = 500          # Root EBS (GiB). 500+ recommended for Isaac Sim / Cosmos images.
 
 #------------------------------------------------------------------------------
+# Optional: Hybrid Nodes (on-premise machines joining the cluster)
+#------------------------------------------------------------------------------
+# Off by default. See docs/deployment-modes.md before enabling — it needs a
+# tunnel into the VPC and a CNI that does not depend on ENIs.
+
+# should_deploy_hybrid_nodes = false
+# hybrid_node_cidrs          = ["172.16.90.0/29"]  # tunnel addresses the nodes register with
+# hybrid_pod_cidrs           = ["172.16.91.0/24"]  # pod addresses on those nodes
+# hybrid_vpn_gateway_target  = ""                  # existing vgw-/tgw-/pcx-/eni- to route them to
+
+# Pinned rather than left to EKS: the Service CIDR is create-only, and EKS may
+# pick a non-default range once remote networks exist. On an EXISTING cluster,
+# set this to what `aws eks describe-cluster` already reports — any other value
+# plans a cluster replacement.
+# cluster_service_ipv4_cidr = "172.20.0.0/16"
+
+#------------------------------------------------------------------------------
 # ALB Access Restriction (optional)
 #------------------------------------------------------------------------------
 

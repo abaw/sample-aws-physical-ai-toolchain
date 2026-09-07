@@ -38,6 +38,12 @@ module "platform" {
   single_nat_gateway  = var.single_nat_gateway
   cluster_name        = var.cluster_name
 
+  # Hybrid node routing
+  deploy_hybrid_nodes       = local.deploy_hybrid_nodes
+  hybrid_node_cidrs         = var.hybrid_node_cidrs
+  hybrid_pod_cidrs          = var.hybrid_pod_cidrs
+  hybrid_vpn_gateway_target = var.hybrid_vpn_gateway_target
+
   # RDS PostgreSQL configuration
   deploy_postgresql           = local.deploy_postgresql
   rds_instance_class          = var.rds_instance_class
@@ -133,6 +139,13 @@ module "eks" {
   cluster_endpoint_public_access  = var.cluster_endpoint_public_access
   cluster_endpoint_private_access = var.cluster_endpoint_private_access
   eks_admin_principal_arns        = var.eks_admin_principal_arns
+  cluster_service_ipv4_cidr       = var.cluster_service_ipv4_cidr
+
+  # Hybrid node configuration
+  deploy_hybrid_nodes       = local.deploy_hybrid_nodes
+  hybrid_node_cidrs         = var.hybrid_node_cidrs
+  hybrid_pod_cidrs          = var.hybrid_pod_cidrs
+  hybrid_policy_server_port = var.hybrid_policy_server_port
 
   # System node group configuration
   system_node_instance_types = var.system_node_instance_types

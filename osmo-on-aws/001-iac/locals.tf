@@ -39,9 +39,46 @@ locals {
   is_backend_only       = var.deployment_mode == "backend-only"
 
   # Component deployment flags based on mode
-  deploy_postgresql = var.should_deploy_postgresql && !local.is_backend_only
-  deploy_redis      = var.should_deploy_redis && !local.is_backend_only
-  deploy_gpu_nodes  = var.should_deploy_gpu_nodes && !local.is_control_plane_only
+  deploy_postgresql   = var.should_deploy_postgresql && !local.is_backend_only
+  deploy_redis        = var.should_deploy_redis && !local.is_backend_only
+  deploy_gpu_nodes    = var.should_deploy_gpu_nodes && !local.is_control_plane_only
+  deploy_hybrid_nodes = var.should_deploy_hybrid_nodes && !local.is_control_plane_only
+
+  # Hybrid node/pod networks, plus the ranges they are not allowed to collide with.
+  hybrid_cidrs = concat(var.hybrid_node_cidrs, var.hybrid_pod_cidrs)
+
+  # AWS requires remote node/pod networks to be RFC-1918 or CGNAT.
+  hybrid_allowed_supernets = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"]
+
+  # Terraform has no CIDR-overlap function, so compare first/last address as
+  # 32-bit integers. cidrhost(c, -1) is the last address in the block.
+  cidr_bounds = {
+    for c in distinct(concat(local.hybrid_cidrs, local.hybrid_allowed_supernets, [var.vpc_cidr, var.cluster_service_ipv4_cidr])) :
+    c => {
+      lo = sum([for i, o in split(".", cidrhost(c, 0)) : tonumber(o) * pow(256, 3 - i)])
+      hi = sum([for i, o in split(".", cidrhost(c, -1)) : tonumber(o) * pow(256, 3 - i)])
+    }
+  }
+
+  hybrid_cidrs_outside_private_space = [
+    for c in local.hybrid_cidrs : c
+    if length([
+      for s in local.hybrid_allowed_supernets : s
+      if local.cidr_bounds[c].lo >= local.cidr_bounds[s].lo && local.cidr_bounds[c].hi <= local.cidr_bounds[s].hi
+    ]) == 0
+  ]
+
+  hybrid_cidrs_overlapping_cluster = [
+    for pair in setproduct(local.hybrid_cidrs, [var.vpc_cidr, var.cluster_service_ipv4_cidr]) :
+    "${pair[0]} overlaps ${pair[1]}"
+    if local.cidr_bounds[pair[0]].lo <= local.cidr_bounds[pair[1]].hi && local.cidr_bounds[pair[1]].lo <= local.cidr_bounds[pair[0]].hi
+  ]
+
+  hybrid_cidrs_overlapping_hybrid = [
+    for pair in setproduct(var.hybrid_node_cidrs, var.hybrid_pod_cidrs) :
+    "${pair[0]} overlaps ${pair[1]}"
+    if local.cidr_bounds[pair[0]].lo <= local.cidr_bounds[pair[1]].hi && local.cidr_bounds[pair[1]].lo <= local.cidr_bounds[pair[0]].hi
+  ]
 
   # S3 bucket names (account ID suffix ensures global uniqueness)
   s3_workflows_bucket = "${local.name_prefix}-workflows-${data.aws_caller_identity.current.account_id}"

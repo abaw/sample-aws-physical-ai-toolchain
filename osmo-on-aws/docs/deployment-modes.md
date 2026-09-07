@@ -140,6 +140,72 @@ kubectl create secret generic osmo-operator-token \
   --from-literal=token="<TOKEN_FROM_CONTROL_PLANE>"
 ```
 
+## Hybrid Nodes (on-premise machines in a cloud cluster)
+
+Orthogonal to the three modes above: hybrid nodes add on-premise machines to an
+existing cluster instead of giving them a cluster of their own.
+
+Reach for it when a single workflow has to span both — a task on cloud GPUs and a
+task on the machine physically wired to a robot, gang-scheduled together. OSMO
+maps a pool to exactly one backend cluster and a workflow to one pool, so tasks
+in one workflow cannot span two clusters. If the on-premise work is a separate
+stage that can run as its own workflow, a backend-only cluster is simpler and
+avoids everything below.
+
+### Configuration
+
+```hcl
+should_deploy_hybrid_nodes = true
+hybrid_node_cidrs          = ["172.16.90.0/29"]   # tunnel addresses nodes register with
+hybrid_pod_cidrs           = ["172.16.91.0/24"]   # pod addresses on those nodes
+hybrid_vpn_gateway_target  = "vgw-xxxxxxxxxxxxxxxxx"
+```
+
+Both CIDRs must be RFC-1918 or CGNAT (`100.64.0.0/10`) and must not overlap
+`vpc_cidr` or `cluster_service_ipv4_cidr`; Terraform fails the plan if they do,
+because EKS accepts a colliding configuration and only then fails to route.
+
+`cluster_service_ipv4_cidr` is pinned to `172.20.0.0/16` by default. It is
+create-only, and once remote networks are configured EKS may choose a
+non-default range to avoid a collision — so on an existing cluster set it to the
+value `aws eks describe-cluster` already reports. Any other value plans a cluster
+replacement.
+
+### What has to be true about the network
+
+Three of the four flows are initiated on-premise and work through any NAT. The
+fourth is not: **the API server connects out to each node's kubelet on 10250**,
+and that is what carries `kubectl logs`, `exec`, `port-forward`, and OSMO's task
+log streaming. Without a route back to the node, it registers, reports `Ready`,
+and every one of those calls hangs.
+
+That single flow decides the connectivity option:
+
+| Option | Verdict |
+|---|---|
+| Direct Connect / Site-to-Site VPN | Correct for a fixed site with a real edge router. Site-to-Site needs a static, internet-routable customer gateway address. |
+| AWS Client VPN | Unusable. For IPv4 it source-NATs client traffic to the endpoint's own address, so nothing in the VPC can initiate a connection to the client. |
+| Self-managed WireGuard | Works from behind NAT on a dynamic address, which is what a laptop has. `should_deploy_hybrid_vpn_gateway` builds one. |
+
+A node also has to register with its **tunnel** address, not its LAN address.
+`nodeadm init` validates this against the declared remote node networks, so the
+mistake fails loudly at init rather than turning into a healthy-looking node
+whose logs never stream.
+
+### CNI
+
+The AWS VPC CNI cannot serve hybrid nodes: it assigns pods real VPC addresses by
+attaching ENIs to the instance, and an on-premise machine has no ENI. AWS's
+supported CNI for hybrid nodes is Cilium, taking pod addresses from
+`hybrid_pod_cidrs`. Mixed clusters are fine — a CNI is a per-node concern, and
+the VPC CNI add-on already carries anti-affinity for the
+`eks.amazonaws.com/compute-type: hybrid` label.
+
+### Cost and lifecycle
+
+Hybrid nodes bill per vCPU-hour for as long as they are attached, so detach
+between sessions rather than leaving an idle machine joined.
+
 ## Multi-Region Architecture
 
 For global deployments:

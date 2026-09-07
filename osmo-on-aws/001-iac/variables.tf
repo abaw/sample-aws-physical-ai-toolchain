@@ -157,6 +157,12 @@ variable "eks_admin_principal_arns" {
   default     = []
 }
 
+variable "cluster_service_ipv4_cidr" {
+  description = "CIDR the cluster assigns Service IPs from. Pinned rather than left to EKS because it is create-only: once remote node networks are configured EKS may pick a non-default range to avoid a collision, and by then changing it means replacing the cluster. On an existing cluster, set this to the value `aws eks describe-cluster` already reports — any other value plans a cluster replacement."
+  type        = string
+  default     = "172.20.0.0/16"
+}
+
 #------------------------------------------------------------------------------
 # System Node Group Configuration
 #------------------------------------------------------------------------------
@@ -245,6 +251,47 @@ variable "gpu_node_volume_size" {
   description = "Root EBS volume size (GiB) for GPU nodes. The 200 GiB default upstream is too small to hold the Isaac Sim (~30 GB) + Cosmos Predict2 (~25 GB) container images alongside the GPU operator driver containers — pods get evicted with 'no space left on device' during image extraction. Must be at least 200 GiB."
   type        = number
   default     = 500
+}
+
+#------------------------------------------------------------------------------
+# Hybrid Nodes (on-premise machines joining the cluster)
+#------------------------------------------------------------------------------
+# Off by default: hybrid nodes change the cluster's network configuration, add
+# routes, and require a non-VPC CNI, none of which a cloud-only deployment wants.
+
+variable "should_deploy_hybrid_nodes" {
+  description = "Declare remote node/pod networks on the cluster so on-premise machines can join as EKS Hybrid Nodes. Requires a tunnel or private link into the VPC (should_deploy_hybrid_vpn_gateway or hybrid_vpn_gateway_target) and a CNI that does not depend on ENIs."
+  type        = bool
+  default     = false
+}
+
+variable "hybrid_node_cidrs" {
+  description = "RemoteNodeNetwork: the addresses hybrid nodes register with. These are tunnel addresses, not LAN addresses — a node that registers with its LAN address looks healthy while kubectl logs/exec hang. Must be RFC-1918 or CGNAT and must not overlap vpc_cidr or cluster_service_ipv4_cidr."
+  type        = list(string)
+  default     = ["172.16.90.0/29"]
+}
+
+variable "hybrid_pod_cidrs" {
+  description = "RemotePodNetwork: pod addresses on hybrid nodes. Kept routable so cloud pods and hybrid pods can reach each other directly and so admission webhooks still work; an unroutable pod network silently loses both."
+  type        = list(string)
+  default     = ["172.16.91.0/24"]
+}
+
+variable "hybrid_policy_server_port" {
+  description = "TCP port a hybrid node's pods use to reach a policy-server pod on a cloud node. EKS writes the cluster security-group rules for remote networks itself but never touches the node security group, which is what pods on EC2 nodes inherit, so this rule has to be written by hand."
+  type        = number
+  default     = 5555
+}
+
+variable "hybrid_vpn_gateway_target" {
+  description = "Existing route target for the hybrid CIDRs — a Direct Connect / Site-to-Site virtual private gateway (vgw-), transit gateway (tgw-), VPC peering connection (pcx-), or ENI (eni-). Leave empty to have Terraform create a WireGuard gateway instead (should_deploy_hybrid_vpn_gateway)."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.hybrid_vpn_gateway_target == "" || can(regex("^(vgw|tgw|pcx|eni)-[0-9a-f]+$", var.hybrid_vpn_gateway_target))
+    error_message = "hybrid_vpn_gateway_target must be empty or an id starting with vgw-, tgw-, pcx- or eni-."
+  }
 }
 
 #------------------------------------------------------------------------------

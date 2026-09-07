@@ -406,3 +406,31 @@ variable "keycloak_realm" {
   type        = string
   default     = "osmo"
 }
+
+#------------------------------------------------------------------------------
+# Hybrid Nodes
+#------------------------------------------------------------------------------
+
+variable "deploy_hybrid_nodes" {
+  description = "Route the hybrid node/pod CIDRs from the private subnets toward the tunnel gateway"
+  type        = bool
+  default     = false
+}
+
+variable "hybrid_node_cidrs" {
+  description = "RemoteNodeNetwork: addresses hybrid nodes register with"
+  type        = list(string)
+  default     = []
+}
+
+variable "hybrid_pod_cidrs" {
+  description = "RemotePodNetwork: pod addresses on hybrid nodes"
+  type        = list(string)
+  default     = []
+}
+
+variable "hybrid_vpn_gateway_target" {
+  description = "Route target for the hybrid CIDRs: vgw-, tgw-, pcx- or eni- id"
+  type        = string
+  default     = ""
+}
