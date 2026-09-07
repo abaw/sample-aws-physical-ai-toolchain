@@ -412,6 +412,72 @@ baked-in defaults for future deploys, edit the realm-creation body in
   fail auth or reject responses. Match the CLI to the deployed control plane
   (`osmo.version` in `config/deployment-config.yaml`, currently `6.3.1`).
 
+### 10. Hybrid Node Issues
+
+#### `terraform plan` wants to replace the cluster after enabling hybrid nodes
+
+**Symptoms:**
+```
+# module.eks.module.eks.aws_eks_cluster.this[0] must be replaced
+      + remote_network_config { # forces replacement
+```
+
+**Cause:** the EKS API supports adding, changing and removing remote networks on a
+live cluster, but the Terraform provider models the block as create-only.
+
+**Solution:** do not apply. Set the configuration through the API, wait for it to
+finish, then enable `should_deploy_hybrid_nodes` — the refreshed state matches the
+configuration, so nothing is left to replace. Commands in
+`docs/deployment-modes.md`.
+
+#### "CIDR overlaps with control plane VPC CIDR"
+
+**Symptoms:**
+```
+InvalidParameterException: Invalid remote node network: CIDR 172.16.90.0/29
+overlaps with control plane VPC CIDR 172.16.0.0/16
+```
+
+**Cause:** besides your VPC and the Service CIDR, the hybrid networks must also
+avoid the VPC EKS runs the control plane in. That CIDR is not exposed by any API,
+so nothing can validate it ahead of time.
+
+**Solution:** take the CIDR from the error message and move `hybrid_node_cidrs` /
+`hybrid_pod_cidrs` out of it. The repo defaults avoid `172.16.0.0/12` for this
+reason.
+
+#### "must be within 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16"
+
+**Cause:** a provider-side check on `remote_network_config`, stricter than the EKS
+API — CGNAT (`100.64.0.0/10`) is documented by AWS and accepted by the API, but
+rejected here. It appears at the end of `plan`, after the rest of the plan has
+already rendered.
+
+**Solution:** use RFC-1918 space. Terraform's own guard catches this earlier with a
+clearer message, so seeing the provider error means the CIDRs were changed
+somewhere that bypasses it.
+
+#### Node is `Ready` but `kubectl logs` and `osmo workflow logs` hang
+
+**Cause:** the API server cannot reach the node's kubelet on 10250 — the one flow
+in this topology that the VPC initiates. Either the node registered with an
+address that is not routable from the VPC, or the route to the hybrid networks is
+missing.
+
+**Solution:** check that the node's `--node-ip` is its tunnel address and inside
+`hybrid_node_cidrs`, and that the private route tables carry both hybrid CIDRs.
+
+#### Small requests succeed but large ones hang
+
+**Cause:** the tunnel's MTU is below the VPC's, so oversized packets are answered
+with ICMP fragmentation-needed. If that reply is filtered, path-MTU discovery
+never completes and the transfer black-holes while handshakes and small requests
+keep working.
+
+**Solution:** confirm the node security group accepts ICMP from the gateway.
+Terraform adds that rule when it builds the gateway; a user-supplied
+`hybrid_vpn_gateway_target` needs the equivalent added by hand.
+
 ## Diagnostic Commands
 
 ### Cluster Health

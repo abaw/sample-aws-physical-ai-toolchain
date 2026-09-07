@@ -90,8 +90,8 @@ gpu_ami_id              = "ami-xxxxxxxxxxxxxxxxx"  # replace with the AMI for yo
 # See docs/deployment-modes.md.
 
 should_deploy_hybrid_nodes = false
-# hybrid_node_cidrs         = ["172.16.90.0/29"]
-# hybrid_pod_cidrs          = ["172.16.91.0/24"]
+# hybrid_node_cidrs         = ["10.90.90.0/29"]
+# hybrid_pod_cidrs          = ["10.90.91.0/24"]
 # hybrid_vpn_gateway_target = "vgw-xxxxxxxxxxxxxxxxx"
 
 #------------------------------------------------------------------------------

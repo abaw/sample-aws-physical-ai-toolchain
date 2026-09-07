@@ -26,7 +26,7 @@ resource "terraform_data" "hybrid_network_guard" {
   lifecycle {
     precondition {
       condition     = length(local.hybrid_cidrs_outside_private_space) == 0
-      error_message = "hybrid_node_cidrs / hybrid_pod_cidrs must be inside RFC-1918 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) or CGNAT (100.64.0.0/10) space, which AWS requires for remote node and pod networks. Outside that space: ${join(", ", local.hybrid_cidrs_outside_private_space)}."
+      error_message = "hybrid_node_cidrs / hybrid_pod_cidrs must be inside RFC-1918 space (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), which is what the AWS provider accepts for remote node and pod networks. Outside that space: ${join(", ", local.hybrid_cidrs_outside_private_space)}."
     }
     precondition {
       condition     = length(local.hybrid_cidrs_overlapping_cluster) == 0

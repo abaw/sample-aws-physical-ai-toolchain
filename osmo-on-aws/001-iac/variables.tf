@@ -266,15 +266,15 @@ variable "should_deploy_hybrid_nodes" {
 }
 
 variable "hybrid_node_cidrs" {
-  description = "RemoteNodeNetwork: the addresses hybrid nodes register with. These are tunnel addresses, not LAN addresses — a node that registers with its LAN address looks healthy while kubectl logs/exec hang. Must be RFC-1918 or CGNAT and must not overlap vpc_cidr or cluster_service_ipv4_cidr."
+  description = "RemoteNodeNetwork: the addresses hybrid nodes register with. These are tunnel addresses, not LAN addresses — a node that registers with its LAN address looks healthy while kubectl logs/exec hang. Must be RFC-1918 and must not overlap vpc_cidr or cluster_service_ipv4_cidr. The default avoids 172.16.0.0/12 because EKS also rejects anything overlapping the CIDR of the VPC it runs the control plane in, which no API exposes and which has been observed in that range."
   type        = list(string)
-  default     = ["172.16.90.0/29"]
+  default     = ["10.90.90.0/29"]
 }
 
 variable "hybrid_pod_cidrs" {
   description = "RemotePodNetwork: pod addresses on hybrid nodes. Kept routable so cloud pods and hybrid pods can reach each other directly and so admission webhooks still work; an unroutable pod network silently loses both."
   type        = list(string)
-  default     = ["172.16.91.0/24"]
+  default     = ["10.90.91.0/24"]
 }
 
 variable "hybrid_policy_server_port" {

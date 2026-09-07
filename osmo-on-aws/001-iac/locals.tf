@@ -47,8 +47,10 @@ locals {
   # Hybrid node/pod networks, plus the ranges they are not allowed to collide with.
   hybrid_cidrs = concat(var.hybrid_node_cidrs, var.hybrid_pod_cidrs)
 
-  # AWS requires remote node/pod networks to be RFC-1918 or CGNAT.
-  hybrid_allowed_supernets = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"]
+  # RFC-1918 only. AWS's own guidance also permits CGNAT (100.64.0.0/10), but the
+  # Terraform provider rejects it client-side, so allowing it here would only move
+  # the failure to a less legible error.
+  hybrid_allowed_supernets = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
 
   # Terraform has no CIDR-overlap function, so compare first/last address as
   # 32-bit integers. cidrhost(c, -1) is the last address in the block.

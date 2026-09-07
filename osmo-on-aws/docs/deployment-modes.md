@@ -156,20 +156,54 @@ avoids everything below.
 
 ```hcl
 should_deploy_hybrid_nodes = true
-hybrid_node_cidrs          = ["172.16.90.0/29"]   # tunnel addresses nodes register with
-hybrid_pod_cidrs           = ["172.16.91.0/24"]   # pod addresses on those nodes
+hybrid_node_cidrs          = ["10.90.90.0/29"]   # tunnel addresses nodes register with
+hybrid_pod_cidrs           = ["10.90.91.0/24"]   # pod addresses on those nodes
 hybrid_vpn_gateway_target  = "vgw-xxxxxxxxxxxxxxxxx"
 ```
 
-Both CIDRs must be RFC-1918 or CGNAT (`100.64.0.0/10`) and must not overlap
-`vpc_cidr` or `cluster_service_ipv4_cidr`; Terraform fails the plan if they do,
-because EKS accepts a colliding configuration and only then fails to route.
+Picking these is more constrained than it looks. Both CIDRs must be RFC-1918 and
+must not overlap `vpc_cidr` or `cluster_service_ipv4_cidr`; Terraform fails the
+plan if they do, because EKS accepts a colliding configuration and only then fails
+to route. Note that AWS's guidance also permits CGNAT (`100.64.0.0/10`) and the
+EKS API accepts it, but the Terraform provider rejects it client-side, so it is
+not usable from here.
+
+There is a further range they must avoid that nothing local can check: the VPC
+EKS runs your control plane in. It is not exposed by any API, so the only way to
+learn it is the rejection — which does name it:
+
+```
+Invalid remote node network: CIDR 172.16.90.0/29 overlaps with
+control plane VPC CIDR 172.16.0.0/16
+```
+
+Between those, the defaults land in `10.90.x` — clear of the default `vpc_cidr`,
+of `172.16.0.0/12`, and of the `192.168.0.0/16` a lab site's own LAN most often
+uses. If you hit the rejection on a different cluster, take the CIDR from the
+error and move the hybrid networks out of it.
 
 `cluster_service_ipv4_cidr` is pinned to `172.20.0.0/16` by default. It is
 create-only, and once remote networks are configured EKS may choose a
 non-default range to avoid a collision — so on an existing cluster set it to the
 value `aws eks describe-cluster` already reports. Any other value plans a cluster
 replacement.
+
+### Enabling this on a cluster that already exists
+
+The EKS API adds, changes and removes remote networks on a live cluster, but the
+Terraform provider models the block as forcing replacement — so setting the flag
+on an existing cluster plans to **destroy and rebuild it**. Do not apply that
+plan. Set the configuration through the API first, then enable the flag: state
+refreshed from the API matches the configuration, so there is no change left for
+the replacement to act on.
+
+```bash
+aws eks update-cluster-config --name "$CLUSTER" \
+  --remote-network-config '{"remoteNodeNetworks":[{"cidrs":["10.90.90.0/29"]}],"remotePodNetworks":[{"cidrs":["10.90.91.0/24"]}]}'
+```
+
+It takes several minutes. Wait for `aws eks describe-update` to report
+`Successful` before planning, then confirm the plan leaves the cluster alone.
 
 ### What has to be true about the network
 
@@ -210,13 +244,13 @@ hybrid_vpn_peers = [
   {
     name        = "lab-machine"
     public_key  = "<the machine's WireGuard public key>"
-    allowed_ips = ["172.16.90.2/32", "172.16.91.0/24"]
+    allowed_ips = ["10.90.90.2/32", "10.90.91.0/24"]
   },
 ]
 ```
 
 Address plan inside `hybrid_node_cidrs`: the gateway takes the **first** address
-(`172.16.90.1` for the default `/29`) so the range is on-link on its tunnel
+(`10.90.90.1` for the default `/29`) so the range is on-link on its tunnel
 interface, and nodes take addresses from `.2` up. A `/29` leaves six usable
 addresses, so assign them deliberately — two machines that pick the same tunnel
 address will each work alone and fail together.
