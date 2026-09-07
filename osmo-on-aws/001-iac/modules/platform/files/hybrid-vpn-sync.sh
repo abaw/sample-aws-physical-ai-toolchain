@@ -14,10 +14,29 @@ set -euo pipefail
 . /etc/default/hybrid-vpn
 export AWS_DEFAULT_REGION="$AWS_REGION"
 
-if ! command -v wg >/dev/null || ! command -v aws >/dev/null; then
+if ! command -v wg > /dev/null || ! command -v unzip > /dev/null; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y -qq wireguard-tools awscli
+  apt-get install -y -qq wireguard-tools curl unzip
+fi
+
+# Not from the distribution: Ubuntu 24.04 carries no awscli package at all, and
+# apt-get reports that as "has no installation candidate" — which fails the whole
+# install, wireguard-tools included, if they share one invocation.
+if ! command -v aws > /dev/null; then
+  case "$(uname -m)" in
+    aarch64) cli_arch=aarch64 ;;
+    x86_64) cli_arch=x86_64 ;;
+    *)
+      echo "no AWS CLI build for $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+  work=$(mktemp -d)
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$cli_arch.zip" -o "$work/awscli.zip"
+  unzip -q "$work/awscli.zip" -d "$work"
+  "$work/aws/install"
+  rm -rf "$work"
 fi
 
 # The instance routes for addresses that are not its own, so this and the ENI's

@@ -176,6 +176,12 @@ resource "aws_instance" "hybrid_vpn" {
   # networks, which EC2 drops by default as spoofed.
   source_dest_check = false
 
+  # Everything this instance is runs out of its user data, and the provider
+  # otherwise applies a user-data change to the attribute only, leaving the
+  # running host on the old script until someone stops and starts it. Replacing
+  # is cheap: the server key is in Parameter Store, not on the disk.
+  user_data_replace_on_change = true
+
   user_data = templatefile("${path.module}/templates/hybrid-vpn-userdata.sh.tftpl", {
     aws_region     = var.aws_region
     kms_key_id     = aws_kms_key.osmo.arn
