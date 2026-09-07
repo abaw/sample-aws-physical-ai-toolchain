@@ -271,6 +271,34 @@ aws ssm get-parameter \
   --query Parameter.Value --output text
 ```
 
+#### MTU
+
+`hybrid_vpn_mtu` defaults to **1280** and must stay explicit. Left to `wg-quick`,
+the tunnel MTU is derived from the local interface — and on EC2 that interface
+uses jumbo frames (9001), so the gateway would happily build ~9000-byte
+encapsulated datagrams and fragment them onto a 1500-byte internet path. Worse,
+at that size it stops emitting the ICMP fragmentation-needed that senders rely on
+to discover the real limit, so path-MTU discovery silently fails.
+
+One tunnel interface serves every peer, so this value has to suit the **worst**
+access path in use, and each client's own `MTU` should match. Corporate networks
+in particular often cap the wire well below 1500; one measured at 1388, which a
+default 1420-byte tunnel (needing 1480 on the wire) cannot use at all.
+
+Find a peer's real limit with a don't-fragment sweep — the wire size is the inner
+size plus 60:
+
+```bash
+for s in 1252 1312 1372; do
+  printf "outer %d: " $((s+88))
+  ping -c2 -M do -s $s <gateway-tunnel-address> >/dev/null 2>&1 && echo OK || echo DROPPED
+done
+```
+
+Raise `hybrid_vpn_mtu` above the default only once every peer's path is measured.
+The cost of leaving it low is a few percent of packet overhead, which is
+irrelevant next to the round-trip time on any tunnel worth having.
+
 Editing `hybrid_vpn_peers` and applying is enough — the gateway reconciles from
 Parameter Store on a timer, so a peer added later takes effect within about a
 minute without replacing the instance. The same timer is why a boot that raced

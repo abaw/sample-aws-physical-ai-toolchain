@@ -469,14 +469,20 @@ missing.
 
 #### Small requests succeed but large ones hang
 
-**Cause:** the tunnel's MTU is below the VPC's, so oversized packets are answered
-with ICMP fragmentation-needed. If that reply is filtered, path-MTU discovery
-never completes and the transfer black-holes while handshakes and small requests
-keep working.
+**Symptoms:** `ping` works, TCP connects, an SSH banner appears — and then it
+stalls. `ssh -vv` typically stops right after `kex: algorithm: ...`, because
+key exchange is the first thing to send a large packet.
 
-**Solution:** confirm the node security group accepts ICMP from the gateway.
-Terraform adds that rule when it builds the gateway; a user-supplied
-`hybrid_vpn_gateway_target` needs the equivalent added by hand.
+**Causes & solutions:**
+- **Tunnel MTU too large for the path.** Find the real limit with a
+  don't-fragment sweep and set `MTU` on the client and `hybrid_vpn_mtu` on the
+  gateway to match the worst path. See `docs/deployment-modes.md`. Note that a
+  tunnel MTU left to `wg-quick` on an EC2 instance is derived from a jumbo-frame
+  interface and will be far too large.
+- **ICMP fragmentation-needed being dropped**, which is what path-MTU discovery
+  needs to work at all. Confirm the node security group accepts ICMP from the
+  gateway; Terraform adds that rule when it builds the gateway, but a
+  user-supplied `hybrid_vpn_gateway_target` needs the equivalent by hand.
 
 ## Diagnostic Commands
 

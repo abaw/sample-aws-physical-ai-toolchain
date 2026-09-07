@@ -459,6 +459,12 @@ variable "hybrid_vpn_listen_port" {
   default     = 51820
 }
 
+variable "hybrid_vpn_mtu" {
+  description = "MTU for the gateway tunnel interface. Must be explicit: derived from a jumbo-frame VPC interface it would fragment onto internet paths and suppress path-MTU discovery."
+  type        = number
+  default     = 1280
+}
+
 variable "hybrid_vpn_ami_id" {
   description = "AMI for the WireGuard gateway. Empty resolves the current Ubuntu 24.04 arm64 image for the region."
   type        = string

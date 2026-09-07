@@ -325,6 +325,12 @@ variable "hybrid_vpn_listen_port" {
   default     = 51820
 }
 
+variable "hybrid_vpn_mtu" {
+  description = "MTU for the gateway's tunnel interface. Must be set explicitly: left alone, wg-quick derives it from the VPC interface, which on EC2 uses jumbo frames — so the gateway would build ~9000-byte encapsulated datagrams and fragment them onto a 1500-byte internet path, and would stop emitting the ICMP fragmentation-needed that lets senders discover the real limit. One interface serves every peer, so this has to suit the worst access path among them; 1280 is the conservative floor. Raise it only after measuring that every peer's path carries this plus 60 bytes of encapsulation."
+  type        = number
+  default     = 1280
+}
+
 variable "hybrid_vpn_ami_id" {
   description = "AMI for the WireGuard gateway. Empty resolves the current Ubuntu 24.04 arm64 image for the region."
   type        = string

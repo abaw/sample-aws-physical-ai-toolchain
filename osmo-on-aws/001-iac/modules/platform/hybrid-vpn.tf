@@ -190,6 +190,7 @@ resource "aws_instance" "hybrid_vpn" {
     peers_param    = local.hybrid_vpn_peers_param
     tunnel_address = local.hybrid_vpn_tunnel_address
     listen_port    = var.hybrid_vpn_listen_port
+    mtu            = var.hybrid_vpn_mtu
     sync_script    = file("${path.module}/files/hybrid-vpn-sync.sh")
   })
 

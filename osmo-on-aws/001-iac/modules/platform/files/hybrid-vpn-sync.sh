@@ -74,6 +74,7 @@ rendered=$(mktemp)
   echo '[Interface]'
   echo "Address = $TUNNEL_ADDRESS"
   echo "ListenPort = $LISTEN_PORT"
+  echo "MTU = $MTU"
   echo "PrivateKey = $priv"
   echo
   printf '%s\n' "$peers"

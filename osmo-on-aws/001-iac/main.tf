@@ -49,6 +49,7 @@ module "platform" {
   hybrid_vpn_allowed_cidrs  = var.hybrid_vpn_allowed_cidrs
   hybrid_vpn_instance_type  = var.hybrid_vpn_instance_type
   hybrid_vpn_listen_port    = var.hybrid_vpn_listen_port
+  hybrid_vpn_mtu            = var.hybrid_vpn_mtu
   hybrid_vpn_ami_id         = var.hybrid_vpn_ami_id
   hybrid_vpn_peers          = var.hybrid_vpn_peers
 
