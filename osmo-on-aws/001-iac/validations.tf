@@ -37,8 +37,20 @@ resource "terraform_data" "hybrid_network_guard" {
       error_message = "hybrid_node_cidrs and hybrid_pod_cidrs must not overlap each other: ${join("; ", local.hybrid_cidrs_overlapping_hybrid)}."
     }
     precondition {
-      condition     = !local.deploy_hybrid_nodes || var.hybrid_vpn_gateway_target != ""
-      error_message = "should_deploy_hybrid_nodes = true needs somewhere to route the hybrid CIDRs. Set hybrid_vpn_gateway_target to an existing vgw-/tgw-/pcx-/eni- id."
+      condition     = !local.deploy_hybrid_nodes || var.hybrid_vpn_gateway_target != "" || var.should_deploy_hybrid_vpn_gateway
+      error_message = "should_deploy_hybrid_nodes = true needs somewhere to route the hybrid CIDRs. Either set hybrid_vpn_gateway_target to an existing vgw-/tgw-/pcx-/eni- id, or set should_deploy_hybrid_vpn_gateway = true to have Terraform build a WireGuard gateway."
+    }
+    precondition {
+      condition     = !(var.should_deploy_hybrid_vpn_gateway && var.hybrid_vpn_gateway_target != "")
+      error_message = "should_deploy_hybrid_vpn_gateway and hybrid_vpn_gateway_target are alternatives, not additives — set exactly one. A site with Direct Connect or a Site-to-Site VPN should route the hybrid CIDRs at that gateway, not at a second, redundant one."
+    }
+    precondition {
+      condition     = !var.should_deploy_hybrid_vpn_gateway || local.deploy_hybrid_nodes
+      error_message = "should_deploy_hybrid_vpn_gateway = true with should_deploy_hybrid_nodes = false builds a gateway with nothing to route: the cluster declares no remote networks and no routes are created. Enable should_deploy_hybrid_nodes, or leave the gateway off."
+    }
+    precondition {
+      condition     = !var.should_deploy_hybrid_vpn_gateway || length(var.hybrid_vpn_allowed_cidrs) > 0
+      error_message = "should_deploy_hybrid_vpn_gateway = true needs hybrid_vpn_allowed_cidrs. With no source CIDRs the gateway's security group accepts no WireGuard traffic and no client can ever complete a handshake."
     }
   }
 }

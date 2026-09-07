@@ -402,3 +402,32 @@ output "keycloak_device_client_id" {
   description = "Keycloak device-flow (CLI) client ID"
   value       = var.deploy_keycloak ? "osmo-device" : null
 }
+
+#------------------------------------------------------------------------------
+# Hybrid VPN Gateway Outputs
+#------------------------------------------------------------------------------
+
+output "hybrid_vpn_endpoint" {
+  description = "Public address clients name as their WireGuard endpoint"
+  value       = local.hybrid_vpn_enabled ? "${aws_eip.hybrid_vpn[0].public_ip}:${var.hybrid_vpn_listen_port}" : null
+}
+
+output "hybrid_vpn_tunnel_address" {
+  description = "Gateway's own address inside the tunnel; hybrid nodes take addresses after it"
+  value       = local.hybrid_vpn_enabled ? local.hybrid_vpn_tunnel_address : null
+}
+
+output "hybrid_vpn_server_public_key_parameter" {
+  description = "SSM parameter holding the gateway's WireGuard public key. Written by the gateway on first boot, so it appears a minute or two after apply."
+  value       = local.hybrid_vpn_enabled ? local.hybrid_vpn_pub_param : null
+}
+
+output "hybrid_vpn_network_interface_id" {
+  description = "Gateway ENI the hybrid routes point at"
+  value       = local.hybrid_vpn_enabled ? aws_instance.hybrid_vpn[0].primary_network_interface_id : null
+}
+
+output "hybrid_vpn_security_group_id" {
+  description = "Gateway security group ID"
+  value       = local.hybrid_vpn_enabled ? aws_security_group.hybrid_vpn[0].id : null
+}

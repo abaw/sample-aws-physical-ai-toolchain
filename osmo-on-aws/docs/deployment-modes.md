@@ -192,6 +192,57 @@ A node also has to register with its **tunnel** address, not its LAN address.
 mistake fails loudly at init rather than turning into a healthy-looking node
 whose logs never stream.
 
+### WireGuard gateway
+
+`should_deploy_hybrid_vpn_gateway = true` builds the WireGuard option: one small
+arm64 instance in a public subnet with its source/destination check disabled, IP
+forwarding on, an elastic IP, and the hybrid routes pointed at its ENI. It is a
+separate flag from `should_deploy_hybrid_nodes` so a site with Direct Connect or
+a Site-to-Site VPN does not get a second, redundant path — set exactly one of
+this flag and `hybrid_vpn_gateway_target`.
+
+```hcl
+should_deploy_hybrid_nodes       = true
+should_deploy_hybrid_vpn_gateway = true
+hybrid_vpn_allowed_cidrs         = ["203.0.113.0/24"]   # where clients dial in from
+
+hybrid_vpn_peers = [
+  {
+    name        = "lab-machine"
+    public_key  = "<the machine's WireGuard public key>"
+    allowed_ips = ["172.16.90.2/32", "172.16.91.0/24"]
+  },
+]
+```
+
+Address plan inside `hybrid_node_cidrs`: the gateway takes the **first** address
+(`172.16.90.1` for the default `/29`) so the range is on-link on its tunnel
+interface, and nodes take addresses from `.2` up. A `/29` leaves six usable
+addresses, so assign them deliberately — two machines that pick the same tunnel
+address will each work alone and fail together.
+
+Peers are public keys only; each machine keeps its own private key. A peer's
+`allowed_ips` is what it is authoritative for: its tunnel address, plus its share
+of `hybrid_pod_cidrs` once it is a node running a CNI. A machine that is only
+being used to test connectivity needs its `/32` alone.
+
+The gateway generates its own key on first boot and stores it in Parameter Store
+as a `SecureString` under the account KMS key, so no private key reaches the
+Terraform state, the user data, or this repository. Its public key appears a
+minute or two after apply, not during it:
+
+```bash
+aws ssm get-parameter \
+  --name "$(terraform output -raw hybrid_vpn_server_public_key_parameter)" \
+  --query Parameter.Value --output text
+```
+
+Editing `hybrid_vpn_peers` and applying is enough — the gateway reconciles from
+Parameter Store on a timer, so a peer added later takes effect within about a
+minute without replacing the instance. The same timer is why a boot that raced
+the elastic IP association recovers on its own. There is no inbound SSH; use
+Session Manager, and `journalctl -u hybrid-vpn-sync` for what it did.
+
 ### CNI
 
 The AWS VPC CNI cannot serve hybrid nodes: it assigns pods real VPC addresses by

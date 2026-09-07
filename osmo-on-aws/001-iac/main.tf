@@ -44,6 +44,14 @@ module "platform" {
   hybrid_pod_cidrs          = var.hybrid_pod_cidrs
   hybrid_vpn_gateway_target = var.hybrid_vpn_gateway_target
 
+  # Hybrid VPN gateway
+  deploy_hybrid_vpn_gateway = var.should_deploy_hybrid_vpn_gateway
+  hybrid_vpn_allowed_cidrs  = var.hybrid_vpn_allowed_cidrs
+  hybrid_vpn_instance_type  = var.hybrid_vpn_instance_type
+  hybrid_vpn_listen_port    = var.hybrid_vpn_listen_port
+  hybrid_vpn_ami_id         = var.hybrid_vpn_ami_id
+  hybrid_vpn_peers          = var.hybrid_vpn_peers
+
   # RDS PostgreSQL configuration
   deploy_postgresql           = local.deploy_postgresql
   rds_instance_class          = var.rds_instance_class
@@ -220,6 +228,23 @@ resource "aws_security_group_rule" "redis_from_eks" {
   source_security_group_id = module.eks.cluster_primary_security_group_id
   security_group_id        = module.platform.redis_security_group_id
   description              = "Redis from EKS cluster"
+}
+
+# Without this, large payloads between a cloud pod and a hybrid pod black-hole:
+# the tunnel's MTU is smaller than the VPC's, so the gateway answers oversized
+# packets with ICMP fragmentation-needed, and path-MTU discovery only works if
+# that reply reaches the sender. Small packets and handshakes succeed throughout,
+# which is what makes the failure look like anything but MTU.
+resource "aws_security_group_rule" "nodes_from_hybrid_vpn_gateway" {
+  count = var.should_deploy_hybrid_vpn_gateway && local.deploy_hybrid_nodes ? 1 : 0
+
+  type                     = "ingress"
+  from_port                = -1
+  to_port                  = -1
+  protocol                 = "icmp"
+  source_security_group_id = module.platform.hybrid_vpn_security_group_id
+  security_group_id        = module.eks.node_security_group_id
+  description              = "Path-MTU discovery from the hybrid VPN gateway"
 }
 
 resource "aws_security_group_rule" "nodes_from_alb" {

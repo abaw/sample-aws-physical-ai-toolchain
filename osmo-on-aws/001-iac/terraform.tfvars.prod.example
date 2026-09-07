@@ -85,7 +85,9 @@ gpu_ami_id              = "ami-xxxxxxxxxxxxxxxxx"  # replace with the AMI for yo
 # Hybrid Nodes (off unless you have on-premise machines to attach)
 #------------------------------------------------------------------------------
 # In production prefer Direct Connect or a Site-to-Site VPN and point the routes
-# at that gateway. See docs/deployment-modes.md.
+# at that gateway, leaving should_deploy_hybrid_vpn_gateway off: the WireGuard
+# gateway is a single instance in the cluster's control path with no redundancy.
+# See docs/deployment-modes.md.
 
 should_deploy_hybrid_nodes = false
 # hybrid_node_cidrs         = ["172.16.90.0/29"]

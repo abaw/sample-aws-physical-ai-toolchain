@@ -11,10 +11,12 @@
 # can address each other directly.
 
 locals {
-  # Gated on the target as well as the flag: without one, aws_route has no target
-  # argument to set, and its own error buries the root-module precondition that
-  # actually says what to fix.
-  hybrid_route_cidrs = var.deploy_hybrid_nodes && var.hybrid_vpn_gateway_target != "" ? concat(var.hybrid_node_cidrs, var.hybrid_pod_cidrs) : []
+  # Derived from configuration alone, never from the gateway's attributes: on a
+  # first apply the gateway's interface id is unknown, and for_each cannot depend
+  # on a value that is only known after apply.
+  hybrid_routing_configured = var.deploy_hybrid_nodes && (var.deploy_hybrid_vpn_gateway || var.hybrid_vpn_gateway_target != "")
+
+  hybrid_route_cidrs = local.hybrid_routing_configured ? concat(var.hybrid_node_cidrs, var.hybrid_pod_cidrs) : []
 
   # One route per (private route table, hybrid CIDR). Keyed by both so the map
   # stays stable when a route table is added.
@@ -26,8 +28,10 @@ locals {
     }
   }
 
+  hybrid_route_target = local.hybrid_vpn_enabled ? aws_instance.hybrid_vpn[0].primary_network_interface_id : var.hybrid_vpn_gateway_target
+
   # aws_route takes the target as a differently named argument per target type.
-  hybrid_target_prefix = split("-", var.hybrid_vpn_gateway_target)[0]
+  hybrid_target_kind = local.hybrid_vpn_enabled ? "eni" : split("-", var.hybrid_vpn_gateway_target)[0]
 }
 
 resource "aws_route" "hybrid" {
@@ -36,8 +40,8 @@ resource "aws_route" "hybrid" {
   route_table_id         = each.value.route_table_id
   destination_cidr_block = each.value.cidr_block
 
-  gateway_id                = local.hybrid_target_prefix == "vgw" ? var.hybrid_vpn_gateway_target : null
-  transit_gateway_id        = local.hybrid_target_prefix == "tgw" ? var.hybrid_vpn_gateway_target : null
-  vpc_peering_connection_id = local.hybrid_target_prefix == "pcx" ? var.hybrid_vpn_gateway_target : null
-  network_interface_id      = local.hybrid_target_prefix == "eni" ? var.hybrid_vpn_gateway_target : null
+  gateway_id                = local.hybrid_target_kind == "vgw" ? local.hybrid_route_target : null
+  transit_gateway_id        = local.hybrid_target_kind == "tgw" ? local.hybrid_route_target : null
+  vpc_peering_connection_id = local.hybrid_target_kind == "pcx" ? local.hybrid_route_target : null
+  network_interface_id      = local.hybrid_target_kind == "eni" ? local.hybrid_route_target : null
 }

@@ -322,6 +322,30 @@ output "alb_security_group_id" {
 }
 
 #------------------------------------------------------------------------------
+# Hybrid VPN Gateway
+#------------------------------------------------------------------------------
+
+output "hybrid_vpn_endpoint" {
+  description = "Endpoint clients put in their WireGuard configuration (null when the gateway is off)"
+  value       = module.platform.hybrid_vpn_endpoint
+}
+
+output "hybrid_vpn_tunnel_address" {
+  description = "Gateway's own address inside the tunnel; hybrid nodes take addresses after it"
+  value       = module.platform.hybrid_vpn_tunnel_address
+}
+
+output "hybrid_vpn_server_public_key_parameter" {
+  description = "SSM parameter holding the gateway's WireGuard public key. The gateway generates its key on first boot, so this parameter appears a minute or two after apply, not during it."
+  value       = module.platform.hybrid_vpn_server_public_key_parameter
+}
+
+output "hybrid_vpn_network_interface_id" {
+  description = "Gateway ENI the hybrid routes point at"
+  value       = module.platform.hybrid_vpn_network_interface_id
+}
+
+#------------------------------------------------------------------------------
 # kubectl Configuration Command
 #------------------------------------------------------------------------------
 

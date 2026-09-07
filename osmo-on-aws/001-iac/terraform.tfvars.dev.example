@@ -88,6 +88,18 @@ should_deploy_hybrid_nodes = false
 # hybrid_pod_cidrs          = ["172.16.91.0/24"]
 # hybrid_vpn_gateway_target = ""  # existing vgw-/tgw-/pcx-/eni- to route the hybrid CIDRs to
 
+# A laptop behind NAT on a dynamic address needs the WireGuard option; the gateway
+# is one always-on t4g.micro plus an elastic IP.
+# should_deploy_hybrid_vpn_gateway = false
+# hybrid_vpn_allowed_cidrs         = ["203.0.113.0/24"]
+# hybrid_vpn_peers = [
+#   {
+#     name        = "lab-machine"
+#     public_key  = "<the machine's WireGuard public key>"
+#     allowed_ips = ["172.16.90.2/32", "172.16.91.0/24"]
+#   },
+# ]
+
 #------------------------------------------------------------------------------
 # RDS PostgreSQL (Minimal)
 #------------------------------------------------------------------------------

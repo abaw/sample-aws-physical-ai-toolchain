@@ -1,0 +1,48 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+#
+# Installs the reconcile script and its timer, then lets the timer do the work.
+# Nothing here needs the network, so a boot that comes up before the elastic IP
+# is associated still ends with a working gateway.
+set -euo pipefail
+
+cat > /etc/default/hybrid-vpn << 'EOF'
+AWS_REGION=${aws_region}
+KMS_KEY_ID=${kms_key_id}
+KEY_PARAM=${key_param}
+PUB_PARAM=${pub_param}
+PEERS_PARAM=${peers_param}
+TUNNEL_ADDRESS=${tunnel_address}
+LISTEN_PORT=${listen_port}
+EOF
+
+cat > /usr/local/bin/hybrid-vpn-sync << 'SYNC_SCRIPT_EOF'
+${sync_script}
+SYNC_SCRIPT_EOF
+chmod 0755 /usr/local/bin/hybrid-vpn-sync
+
+cat > /etc/systemd/system/hybrid-vpn-sync.service << 'EOF'
+[Unit]
+Description=Reconcile the WireGuard hybrid-node gateway
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hybrid-vpn-sync
+EOF
+
+cat > /etc/systemd/system/hybrid-vpn-sync.timer << 'EOF'
+[Unit]
+Description=Reconcile the WireGuard hybrid-node gateway periodically
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=60s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now hybrid-vpn-sync.timer

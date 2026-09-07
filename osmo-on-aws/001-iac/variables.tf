@@ -295,6 +295,53 @@ variable "hybrid_vpn_gateway_target" {
 }
 
 #------------------------------------------------------------------------------
+# Hybrid VPN Gateway (WireGuard)
+#------------------------------------------------------------------------------
+# A separate flag from should_deploy_hybrid_nodes: a site that already has Direct
+# Connect or a Site-to-Site VPN must not also get this, so exactly one of this
+# flag and hybrid_vpn_gateway_target may be set.
+
+variable "should_deploy_hybrid_vpn_gateway" {
+  description = "Create a small WireGuard gateway in a public subnet and route the hybrid CIDRs at it. For hybrid nodes behind NAT on a dynamic address, where Site-to-Site VPN (needs a static customer gateway address) and Client VPN (source-NATs, so nothing in the VPC can initiate to the node) both fail."
+  type        = bool
+  default     = false
+}
+
+variable "hybrid_vpn_allowed_cidrs" {
+  description = "Source CIDRs allowed to reach the gateway's WireGuard port. A residential or corporate address usually rotates within a block, so allow the block rather than a single address."
+  type        = list(string)
+  default     = []
+}
+
+variable "hybrid_vpn_instance_type" {
+  description = "Instance type for the WireGuard gateway. It forwards packets and does nothing else; the default is arm64, so hybrid_vpn_ami_id must match if it is overridden."
+  type        = string
+  default     = "t4g.micro"
+}
+
+variable "hybrid_vpn_listen_port" {
+  description = "UDP port the WireGuard gateway listens on"
+  type        = number
+  default     = 51820
+}
+
+variable "hybrid_vpn_ami_id" {
+  description = "AMI for the WireGuard gateway. Empty resolves the current Ubuntu 24.04 arm64 image for the region."
+  type        = string
+  default     = ""
+}
+
+variable "hybrid_vpn_peers" {
+  description = "WireGuard peers allowed through the gateway. Public keys only — each peer keeps its private key. allowed_ips is what that peer is authoritative for: its own tunnel address, plus its pod CIDR once it is a node running a CNI."
+  type = list(object({
+    name        = string
+    public_key  = string
+    allowed_ips = list(string)
+  }))
+  default = []
+}
+
+#------------------------------------------------------------------------------
 # RDS PostgreSQL Configuration
 #------------------------------------------------------------------------------
 

@@ -82,6 +82,18 @@ eks_admin_principal_arns = [
 # hybrid_pod_cidrs           = ["172.16.91.0/24"]  # pod addresses on those nodes
 # hybrid_vpn_gateway_target  = ""                  # existing vgw-/tgw-/pcx-/eni- to route them to
 
+# For nodes behind NAT on a dynamic address, Terraform can build a WireGuard
+# gateway instead. Set exactly one of this and hybrid_vpn_gateway_target.
+# should_deploy_hybrid_vpn_gateway = false
+# hybrid_vpn_allowed_cidrs         = ["203.0.113.0/24"]  # where clients dial in from
+# hybrid_vpn_peers = [
+#   {
+#     name        = "lab-machine"
+#     public_key  = "<the machine's WireGuard public key>"
+#     allowed_ips = ["172.16.90.2/32", "172.16.91.0/24"]
+#   },
+# ]
+
 # Pinned rather than left to EKS: the Service CIDR is create-only, and EKS may
 # pick a non-default range once remote networks exist. On an EXISTING cluster,
 # set this to what `aws eks describe-cluster` already reports — any other value

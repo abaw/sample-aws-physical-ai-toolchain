@@ -434,3 +434,43 @@ variable "hybrid_vpn_gateway_target" {
   type        = string
   default     = ""
 }
+
+variable "deploy_hybrid_vpn_gateway" {
+  description = "Create a WireGuard gateway instance in a public subnet and route the hybrid CIDRs at it"
+  type        = bool
+  default     = false
+}
+
+variable "hybrid_vpn_allowed_cidrs" {
+  description = "Source CIDRs allowed to reach the gateway's WireGuard port"
+  type        = list(string)
+  default     = []
+}
+
+variable "hybrid_vpn_instance_type" {
+  description = "Instance type for the WireGuard gateway"
+  type        = string
+  default     = "t4g.micro"
+}
+
+variable "hybrid_vpn_listen_port" {
+  description = "UDP port the WireGuard gateway listens on"
+  type        = number
+  default     = 51820
+}
+
+variable "hybrid_vpn_ami_id" {
+  description = "AMI for the WireGuard gateway. Empty resolves the current Ubuntu 24.04 arm64 image for the region."
+  type        = string
+  default     = ""
+}
+
+variable "hybrid_vpn_peers" {
+  description = "WireGuard peers: public keys and the addresses each one is authoritative for"
+  type = list(object({
+    name        = string
+    public_key  = string
+    allowed_ips = list(string)
+  }))
+  default = []
+}
