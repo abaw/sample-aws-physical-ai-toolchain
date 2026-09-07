@@ -9,7 +9,7 @@ recorded, in [LeRobot](https://github.com/huggingface/lerobot) format.
 | Stage | Workflow | GPU | Measured wall clock | Publishes |
 |---|---|:---:|---|---|
 | 01 | `01_prepare_dataset.yaml` | none needed | ~4 min | a validated dataset at a stable prefix |
-| 02 | `02_finetune.yaml` | 1 | ~10 min for a 10-step smoke run; ~3 h for 10k steps | checkpoints, per run |
+| 02 | `02_finetune.yaml` | 1 | ~10 min for a 10-step smoke run; **~6 h for 10k steps** | checkpoints, per run |
 | 03 | `03_openloop_eval.yaml` | 1 | ~9 min | per-dimension plots and error metrics |
 
 Run them in order. Each reads what the previous published, so the seam between them is an S3 prefix
@@ -100,8 +100,9 @@ osmo workflow submit 003-workflows/so101-vla/02_finetune.yaml \
         max_steps=10 save_steps=10 exec_timeout=1h
 ```
 
-Then the real run, with `max_steps` in the 10k-20k range. Budget `exec_timeout` from the smoke run's
-step rate: **a task killed by its timeout publishes nothing.**
+Then the real run, with `max_steps` in the 10k-20k range — about 6 h for 10k steps. Do not budget
+`exec_timeout` from a smoke run's step rate: a short run is dominated by start-up and reports roughly
+twice the throughput a sustained run achieves. **A task killed by its timeout publishes nothing.**
 
 Checkpoints land under `$B/checkpoints/<model>/<workflow-id>/`, one prefix per run, so two experiments
 cannot overwrite each other and later stages can pin an exact run.
@@ -124,7 +125,15 @@ osmo workflow submit 003-workflows/so101-vla/03_openloop_eval.yaml \
 Name **one** `checkpoint-<step>/` prefix. Pointing `checkpoint_url` at a whole run prefix works, but a
 run retains five checkpoints of ~24 GiB each and all of them are downloaded before the task starts.
 
-Use episodes the fine-tune did not train on, and use several — one lucky trajectory is not convergence.
+Use several trajectories — one lucky trajectory is not convergence.
+
+**Hold episodes back yourself if you want a generalisation measure.** Stage 02 trains on *every* episode
+in the dataset it is given, so evaluating the resulting checkpoint against that same dataset measures how
+well the policy fits data it has already seen. That is still worth doing — it catches joint-order and
+normalization faults, and a policy that cannot even reproduce its training data is not worth putting near
+an arm — but it will not tell you whether the policy generalises. For that, run stage 01 twice to publish
+a training prefix and a holdout prefix from disjoint episodes, then point stage 02 at the first and
+stage 03 at the second.
 
 ## Reading the result
 
@@ -159,9 +168,19 @@ What the plots separate:
 - **Everything at the wrong scale** → missing normalization statistics. Both stages fail the run rather
   than publish a checkpoint without them, so this should not reach you.
 
-For calibration, the 10-step smoke checkpoint above scores average **MSE ≈ 1347, MAE ≈ 30** on this
-example's dataset. That is the floor — a useful run must be far below it. If a 10-step checkpoint ever
-looks *good*, suspect the evaluation, not the model.
+For calibration, measured on this example's 43-episode dataset at four trajectories each:
+
+| Checkpoint | Average MSE | Average MAE |
+|---|---|---|
+| 10 steps (a smoke run) | 1347 | 30.0 |
+| 6,000 steps | 15.5 | 2.44 |
+| 10,000 steps | 9.06 | 1.55 |
+
+The 10-step row is the floor: if a checkpoint that has barely trained ever looks *good*, suspect the
+evaluation rather than the model. Two orders of magnitude separate it from a trained run, so this metric
+discriminates strongly — and error still fell between 6,000 and 10,000 steps on every trajectory, so
+10,000 is not past the useful point for a dataset this size. These are training episodes, so read them as
+fit, not generalisation.
 
 `execution_horizon` and `denoising_steps` are exposed here because they are also the two knobs that set
 a real-time control loop's latency budget. Evaluate at the values you intend to drive an arm with.
@@ -183,7 +202,9 @@ limit, and that transient is what evicts a long run that budgeted for five.
 | | |
 |---|---|
 | Trainable parameters | 1,620,515,968 (51.5% of the model) |
-| Step time, steady state | ~1.0 s/step |
+| Step time, sustained | ~2.0 s/step at `global_batch_size: 32` |
+| 10,000 steps, end to end | 5 h 52 m, including ten checkpoint saves and a 140 GB upload |
+| Training loss | 1.141 → 0.018 over 10,000 steps (one epoch of 43 episodes) |
 | Checkpoint size | ~24 GiB |
 
 It fits one card because the visual tower and the language backbone stay frozen — the upstream default,
@@ -213,8 +234,8 @@ scales a node group up or down for you.
 | Stage | Status | Notes |
 |---|---|---|
 | 01 prepare | Validated | Both acquisition paths, v2 and v3 inputs, `model=none` and `gr00t-n17` |
-| 02 fine-tune | Validated at 10 steps | A full 10k-step run has not been done |
-| 03 open-loop eval | Validated | Against a 10-step checkpoint, i.e. as a negative control |
+| 02 fine-tune | Validated at 10,000 steps | Loss 1.141 → 0.018 in 5 h 52 m; all five retained checkpoints verified against their manifests |
+| 03 open-loop eval | Validated | Against 10-step, 6,000-step and 10,000-step checkpoints — the metric separates them by two orders of magnitude |
 | Hardware-in-the-loop | Not included | This example ends at open-loop evaluation |
 
 A reader with no robot gets the complete pipeline through stage 03. That is deliberate.
