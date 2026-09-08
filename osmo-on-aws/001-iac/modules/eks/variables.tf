@@ -81,11 +81,6 @@ variable "hybrid_pod_cidrs" {
   type        = list(string)
 }
 
-variable "hybrid_policy_server_port" {
-  description = "TCP port hybrid-node pods use to reach a policy-server pod on a cloud node"
-  type        = number
-}
-
 #------------------------------------------------------------------------------
 # System Node Group Configuration
 #------------------------------------------------------------------------------

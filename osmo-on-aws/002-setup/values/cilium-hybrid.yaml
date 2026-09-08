@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# Cilium, confined to hybrid nodes.
+#
+# The VPC CNI cannot serve a hybrid node: it allocates pod addresses by calling
+# EC2 to attach ENIs or prefixes to that instance, and a machine outside AWS has
+# no instance to attach them to. Cilium is the CNI AWS supports for hybrid nodes,
+# and support is conditional on using the AWS-maintained builds.
+#
+# Two CNIs in one cluster is legitimate because a CNI is a per-node concern —
+# kubelet invokes whatever plugin is on that node's disk. The VPC CNI add-on
+# already carries anti-affinity for the hybrid compute type, so only the mirror
+# image is needed here and no aws-node patching.
+#
+# The pod CIDR and MTU are deployment-specific and are passed by
+# 06-deploy-hybrid-nodes.sh from Terraform outputs, so this file stays generic.
+
+# Agent: hybrid nodes only. Its default tolerations already accept any taint,
+# which matters because the node carrying the robot is tainted so ordinary
+# workloads stay off it — the CNI is infrastructure and has to run there anyway.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: eks.amazonaws.com/compute-type
+              operator: In
+              values:
+                - hybrid
+
+ipam:
+  # The operator hands each node a slice of the cluster pool, which must be the
+  # cluster's RemotePodNetwork. Neither the pool nor the slice size can be
+  # changed after nodes have addresses from them.
+  mode: cluster-pool
+
+operator:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: eks.amazonaws.com/compute-type
+                operator: In
+                values:
+                  - hybrid
+
+  # One replica because the chart's default of two carries a required
+  # anti-affinity on hostname: with a single hybrid node the second replica has
+  # nowhere to go and sits Pending forever.
+  replicas: 1
+
+  # Unlike the agent, the operator's default tolerations are an explicit list
+  # rather than a blanket one, and setting this key replaces that list. It must
+  # keep not-ready — the operator has to schedule onto a node that is NotReady
+  # precisely because Cilium is not running there yet — and it must accept
+  # whatever taint keeps other workloads off the hybrid node.
+  tolerations:
+    - operator: Exists
+
+  # Off, because the pods already running on cloud nodes are managed by the VPC
+  # CNI and are not Cilium's to restart.
+  unmanagedPodWatcher:
+    restart: false
+
+# Service Traffic Distribution needs this to resolve topology on mixed clusters.
+loadBalancer:
+  serviceTopology: true
+
+# The L7 proxy is unused here, and it is one less component to run on a laptop.
+envoy:
+  enabled: false
+
+# kube-proxy is a pinned EKS add-on and runs on hybrid nodes too, so Cilium must
+# not replace it. Leaving it in place is also what makes ClusterIP Services and
+# CoreDNS resolve from the hybrid node, which is what lets a task there address
+# a service by name.
+kubeProxyReplacement: "false"

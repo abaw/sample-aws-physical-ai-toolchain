@@ -151,10 +151,9 @@ module "eks" {
   cluster_service_ipv4_cidr       = var.cluster_service_ipv4_cidr
 
   # Hybrid node configuration
-  deploy_hybrid_nodes       = local.deploy_hybrid_nodes
-  hybrid_node_cidrs         = var.hybrid_node_cidrs
-  hybrid_pod_cidrs          = var.hybrid_pod_cidrs
-  hybrid_policy_server_port = var.hybrid_policy_server_port
+  deploy_hybrid_nodes = local.deploy_hybrid_nodes
+  hybrid_node_cidrs   = var.hybrid_node_cidrs
+  hybrid_pod_cidrs    = var.hybrid_pod_cidrs
 
   # System node group configuration
   system_node_instance_types = var.system_node_instance_types

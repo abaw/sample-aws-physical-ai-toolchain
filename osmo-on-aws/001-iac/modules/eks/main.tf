@@ -98,23 +98,26 @@ module "eks" {
         cidr_blocks = ["0.0.0.0/0"]
       }
     },
+    # All ports, matching what cloud nodes already grant each other above, because
+    # a hybrid node's pods are cluster pods and reach the same things. An
+    # enumerated port list looks tighter but is wrong the moment a pod needs
+    # anything unlisted, and the first thing it needs is CoreDNS: the add-on's
+    # replicas run on cloud nodes, so pod-to-DNS crosses this security group
+    # rather than staying on the node. EKS writes the *cluster* security group's
+    # rules for remote networks itself but never touches this one.
+    #
     # Both hybrid CIDRs, not just the pod one: a CNI that masquerades pod egress
     # to the node address (Cilium's default) makes this traffic arrive sourced
     # from the node CIDR instead.
+    #
+    # The blast radius is bounded upstream — these addresses exist only inside the
+    # tunnel, which admits registered peers from hybrid_vpn_allowed_cidrs alone.
     var.deploy_hybrid_nodes ? {
-      ingress_hybrid_policy_server = {
-        description = "Hybrid-node pods to a policy server on a cloud node"
-        protocol    = "tcp"
-        from_port   = var.hybrid_policy_server_port
-        to_port     = var.hybrid_policy_server_port
-        type        = "ingress"
-        cidr_blocks = concat(var.hybrid_node_cidrs, var.hybrid_pod_cidrs)
-      }
-      ingress_hybrid_icmp = {
-        description = "Hybrid node reachability checks"
-        protocol    = "icmp"
-        from_port   = -1
-        to_port     = -1
+      ingress_hybrid_all = {
+        description = "Hybrid nodes and their pods, all ports/protocols"
+        protocol    = "-1"
+        from_port   = 0
+        to_port     = 0
         type        = "ingress"
         cidr_blocks = concat(var.hybrid_node_cidrs, var.hybrid_pod_cidrs)
       }

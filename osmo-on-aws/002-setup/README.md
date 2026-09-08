@@ -30,9 +30,18 @@ Run scripts in numerical order:
 
 # 5. Deploy OSMO Backend Operator (also creates the osmo-workflow IRSA SA)
 ./05-deploy-osmo-backend.sh
+
+# 6. OPT-IN, only for clusters with on-premise nodes: SSM hybrid activation and
+#    a CNI that can serve nodes with no ENI. Exits doing nothing when hybrid
+#    nodes are off in 001-iac, so it is not part of a normal deployment.
+./06-deploy-hybrid-nodes.sh --create-activation   # onboarding a machine
+./06-deploy-hybrid-nodes.sh                       # install Cilium, after the node joins
 ```
 
-> **6.3 / ConfigMap mode:** Scripts `06`–`09` are **retired no-op stubs**. All of
+See [../docs/hybrid-nodes-so101.md](../docs/hybrid-nodes-so101.md) for the
+machine-side half of step 6, which has to happen between those two commands.
+
+> **6.3 / ConfigMap mode:** Scripts `07`–`09` are **retired no-op stubs**. All of
 > their configuration (pools, `l40s` platform, pod templates, roles, KAI backend
 > scheduler, dataset/workflow storage) is now declarative under `services.configs.*`
 > in `values/osmo-control-plane.yaml` (+ a generated overlay) and applied by Step 4.

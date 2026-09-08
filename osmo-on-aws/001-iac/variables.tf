@@ -277,12 +277,6 @@ variable "hybrid_pod_cidrs" {
   default     = ["10.90.91.0/24"]
 }
 
-variable "hybrid_policy_server_port" {
-  description = "TCP port a hybrid node's pods use to reach a policy-server pod on a cloud node. EKS writes the cluster security-group rules for remote networks itself but never touches the node security group, which is what pods on EC2 nodes inherit, so this rule has to be written by hand."
-  type        = number
-  default     = 5555
-}
-
 variable "hybrid_vpn_gateway_target" {
   description = "Existing route target for the hybrid CIDRs — a Direct Connect / Site-to-Site virtual private gateway (vgw-), transit gateway (tgw-), VPC peering connection (pcx-), or ENI (eni-). Leave empty to have Terraform create a WireGuard gateway instead (should_deploy_hybrid_vpn_gateway)."
   type        = string

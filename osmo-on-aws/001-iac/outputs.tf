@@ -340,6 +340,21 @@ output "hybrid_nodes_activation_tag" {
   value       = module.eks.hybrid_nodes_activation_tag
 }
 
+output "hybrid_node_cidrs" {
+  description = "RemoteNodeNetwork the cluster accepts hybrid node addresses from"
+  value       = local.deploy_hybrid_nodes ? var.hybrid_node_cidrs : null
+}
+
+output "hybrid_pod_cidrs" {
+  description = "RemotePodNetwork the hybrid-node CNI must allocate pod addresses from"
+  value       = local.deploy_hybrid_nodes ? var.hybrid_pod_cidrs : null
+}
+
+output "hybrid_tunnel_mtu" {
+  description = "MTU of the tunnel hybrid nodes reach the VPC through. The hybrid-node CNI subtracts its own encapsulation overhead from this, and auto-detection gets it wrong because a split-tunnel machine's default route is its LAN."
+  value       = local.deploy_hybrid_nodes && var.should_deploy_hybrid_vpn_gateway ? var.hybrid_vpn_mtu : null
+}
+
 #------------------------------------------------------------------------------
 # Hybrid VPN Gateway
 #------------------------------------------------------------------------------

@@ -34,6 +34,9 @@ dependencies:
   cluster_autoscaler_version: "9.35.0"
   external_secrets_version: "0.9.13"
   external_dns_version: "1.14.3"
+  # Hybrid nodes only. Must be an AWS-maintained build from
+  # public.ecr.aws/eks/cilium/cilium; only v1.17.x and v1.18.x are supported there.
+  cilium_version: "1.18.12-1"
   envoy_image: "envoyproxy/envoy:v1.38.1"
   oauth2_proxy_image: "quay.io/oauth2-proxy/oauth2-proxy:v7.14.2"
 

@@ -340,6 +340,28 @@ supported CNI for hybrid nodes is Cilium, taking pod addresses from
 the VPC CNI add-on already carries anti-affinity for the
 `eks.amazonaws.com/compute-type: hybrid` label.
 
+`002-setup/06-deploy-hybrid-nodes.sh` installs it, confined to hybrid nodes by
+affinity so it never touches a cloud node. Run it **after** the first machine has
+joined: the Cilium operator carries the same affinity and has nowhere to run until a
+hybrid node exists.
+
+The pod CIDR and the tunnel MTU are passed from Terraform outputs rather than
+written into the values file, and both are fixed for the life of the installation —
+the pod CIDR because Cilium cannot renumber nodes that already hold addresses from
+it, the MTU because getting it wrong produces a network that passes every small-packet
+check and drops the first large one.
+
+Because the node's traffic goes through a tunnel, the node security group opens all
+ports to the hybrid node and pod CIDRs, matching what cloud nodes already grant each
+other. An enumerated port list is tighter on paper and wrong in practice: the first
+thing a pod there needs is CoreDNS, whose replicas run on cloud nodes, so that
+traffic crosses this security group rather than staying local.
+
+### Onboarding a machine
+
+[hybrid-nodes-so101.md](hybrid-nodes-so101.md) is the per-machine runbook: tunnel
+configuration, `nodeadm`, the node IP and taint, devices, and detaching afterwards.
+
 ### Cost and lifecycle
 
 Hybrid nodes bill per vCPU-hour for as long as they are attached, so detach

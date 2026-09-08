@@ -336,7 +336,10 @@ osmo-on-aws/
 | `control-plane-only` | Central management cluster without GPU nodes |
 | `backend-only` | Compute cluster connecting to external control plane |
 
-See [docs/deployment-modes.md](docs/deployment-modes.md) for details.
+See [docs/deployment-modes.md](docs/deployment-modes.md) for details, including
+hybrid nodes — an opt-in addition, orthogonal to the three modes, that lets a
+machine on your own network join the cluster. Onboarding one is
+[docs/hybrid-nodes-so101.md](docs/hybrid-nodes-so101.md).
 
 ## Configuration
 

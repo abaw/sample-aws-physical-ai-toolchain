@@ -484,6 +484,63 @@ key exchange is the first thing to send a large packet.
   gateway; Terraform adds that rule when it builds the gateway, but a
   user-supplied `hybrid_vpn_gateway_target` needs the equivalent by hand.
 
+#### Cilium on a hybrid node cannot reach the API server on the service CIDR
+
+**Symptoms:** the agent's `config` init container fails and the pod never leaves
+`Init:0/6`:
+```
+level=error msg="Unable to contact k8s api-server" ipAddr=https://172.20.0.1:443
+  error="dial tcp 172.20.0.1:443: i/o timeout"
+```
+Direct connections from the machine to a cluster ENI on 443 succeed, so the tunnel
+itself is fine.
+
+**Cause:** the tunnel has no route for the **service** CIDR. kube-proxy rewrites the
+ClusterIP to a VPC address, but the kernel's route lookup happens before the rewrite,
+so it lands on the LAN interface and selects that interface's address as the source.
+The rewritten packet then leaves through the tunnel with a source address the VPC
+cannot route a reply to.
+
+**Confirm it in one command** — bind a client to the tunnel address and it works
+where an unbound one times out:
+```bash
+curl -sk --max-time 8 --interface <tunnel address> https://<service CIDR>.1:443/version
+```
+`ip route get <a ClusterIP>` resolving via the LAN interface is the same evidence.
+
+**Solution:** add the service CIDR to the client's `AllowedIPs` so `wg-quick` creates
+the route. Nothing with a service address ever crosses the wire; the entry exists only
+to make the route lookup pick the tunnel, which is enough for the kernel to select the
+tunnel address as the source.
+
+#### Pod on a hybrid node cannot resolve DNS or reach a Service
+
+**Cause:** the CoreDNS replicas run on cloud nodes, so pod-to-DNS traffic crosses the
+**node** security group. EKS writes the *cluster* security group's rules for remote
+networks itself but never touches the node security group.
+
+**Solution:** enabling hybrid nodes opens the node security group to the hybrid node
+and pod CIDRs. A deployment supplying its own `hybrid_vpn_gateway_target` needs the
+equivalent rule by hand. Note pod egress arrives sourced from the **node** address,
+because the CNI masquerades — so a rule covering only the pod CIDR will not match.
+
+#### `cilium-operator` stays `Pending`
+
+**Cause:** it is pinned to hybrid nodes by affinity, so it has nowhere to run until
+one has joined.
+
+**Solution:** expected before the first `nodeadm init`. Run the setup step after a
+node has registered. A second replica also stays `Pending` forever with a single
+hybrid node, because the chart's default anti-affinity is per-hostname.
+
+#### Pods on a hybrid node stick in `Terminating`
+
+**Cause:** on Ubuntu, the containerd AppArmor defect fixed in containerd 1.7.19. It
+presents as a CNI or tunnel problem and is neither.
+
+**Solution:** install a containerd ≥ 1.7.19, or re-run `nodeadm install` with
+`--containerd-source docker`. Releases shipping containerd 2.x are unaffected.
+
 ## Diagnostic Commands
 
 ### Cluster Health
