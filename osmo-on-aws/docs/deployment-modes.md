@@ -357,6 +357,24 @@ other. An enumerated port list is tighter on paper and wrong in practice: the fi
 thing a pod there needs is CoreDNS, whose replicas run on cloud nodes, so that
 traffic crosses this security group rather than staying local.
 
+### Running OSMO tasks there
+
+Two things a task needs that a cloud task gets for free.
+
+**A runtime class the node has.** OSMO generates every task pod asking for the
+NVIDIA container runtime. On a machine without it the pod is scheduled and then
+never gets a sandbox. The setup step creates a `runc` RuntimeClass and the edge
+platform names it; the field cannot simply be blanked, because an empty runtime
+class name is rejected outright and the workflow then fails with no message.
+
+**Reachable AWS endpoints for IRSA.** Pod credentials come from IRSA, which
+exchanges a projected token at STS. Where the VPC has interface endpoints with
+private DNS, a pod resolves through CoreDNS and the VPC resolver, so it gets those
+endpoints' private addresses and reaches them over the tunnel — the endpoint
+security group therefore has to admit the hybrid CIDRs, which enabling hybrid nodes
+does. The node itself resolves through its own network and never notices, which is
+why image pulls can work while every task hangs.
+
 ### Onboarding a machine
 
 [hybrid-nodes-so101.md](hybrid-nodes-so101.md) is the per-machine runbook: tunnel

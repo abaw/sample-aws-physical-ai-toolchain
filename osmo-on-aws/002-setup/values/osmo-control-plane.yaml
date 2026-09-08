@@ -198,6 +198,37 @@ services:
               emptyDir:
                 medium: Memory
                 sizeLimit: 8Gi
+      # Places a task on an on-premise hybrid node. The nodeSelector is a label the
+      # node carries from registration, never its name — under SSM credentials the
+      # node name is generated (mi-…) and nothing may depend on it.
+      #
+      # The toleration matches the taint such a node also registers with, which is
+      # what keeps ordinary cluster workloads off a machine wired to hardware. Both
+      # halves are set in the node's own bootstrap configuration rather than applied
+      # afterwards, so there is no window in which the machine is schedulable.
+      #
+      # Same service account as gpu_tolerations: IRSA works unchanged on a hybrid
+      # node, because a projected token exchanged at STS never involves IMDS.
+      so101_edge:
+        spec:
+          # OSMO generates every task pod with the NVIDIA container runtime, which
+          # a machine with no GPU has no reason to have installed — the pod is
+          # scheduled and then never gets a sandbox, failing with
+          # `no runtime for "nvidia" is configured` rather than anything that names
+          # the real problem. Blanking the field does not work: the API server
+          # rejects an empty runtime class name, and the workflow fails server-side
+          # before a pod exists. So name the default runtime explicitly; the
+          # RuntimeClass is created by 06-deploy-hybrid-nodes.sh.
+          runtimeClassName: runc
+          serviceAccountName: osmo-workflow
+          automountServiceAccountToken: true
+          tolerations:
+            - key: osmo/edge
+              operator: Equal
+              value: so101
+              effect: NoSchedule
+          nodeSelector:
+            osmo/node-type: so101-edge
 
     # Backend scheduler settings (KAI co-scheduling). Applied declaratively here (no separate configure step).
     backends:
@@ -240,6 +271,31 @@ services:
             override_pod_template:
               - gpu_tolerations
               - shared_memory
+
+          # An on-premise machine with hardware attached. Present only when the
+          # cluster has hybrid nodes; with none, it simply has no capacity and a
+          # workflow targeting it is rejected at submit time.
+          #
+          # allowed_mounts rather than default_mounts: the platform grants
+          # permission to expose a device, and the workflow states which ones it
+          # actually wants. Adjust the list to the machine — a serial device's
+          # number depends on plug order, and a USB camera usually claims two
+          # /dev/video* nodes, one stream and one metadata.
+          so101-edge:
+            description: "On-premise machine with an SO-101 arm (robot I/O, inference elsewhere)"
+            host_network_allowed: false
+            # Character devices need it in practice. The blast radius is one
+            # single-purpose machine, which is why the node is tainted.
+            privileged_allowed: true
+            allowed_mounts:
+              - /dev/ttyACM0
+              - /dev/ttyACM1
+              - /dev/video0
+              - /dev/video1
+              - /dev/video2
+              - /dev/video3
+            override_pod_template:
+              - so101_edge
 
     # IdP role mapping (external_roles). Applied declaratively here (no separate configure step).
     # Policies are product defaults; we only map Keycloak groups 1:1.

@@ -533,6 +533,75 @@ one has joined.
 node has registered. A second replica also stays `Pending` forever with a single
 hybrid node, because the chart's default anti-affinity is per-hostname.
 
+#### Workflow task on a hybrid node never starts: `no runtime for "nvidia" is configured`
+
+**Symptoms:** the pod is scheduled to the hybrid node and then repeats
+`FailedCreatePodSandBox … no runtime for "nvidia" is configured`. It never reaches
+image pull, so nothing in the task logs explains it.
+
+**Cause:** OSMO generates every task pod with `runtimeClassName: nvidia`, which a
+machine with no GPU has no reason to have installed.
+
+**Solution:** give the platform's pod template a runtime class the node does have.
+Blanking the field does not work — the API server rejects an empty runtime class
+name, and the workflow then fails server-side before any pod exists, with no
+message. `06-deploy-hybrid-nodes.sh` creates a `runc` RuntimeClass for this, and
+the edge platform names it. Any GPU-less platform needs the same.
+
+#### Workflow task on a hybrid node hangs after the script finishes
+
+**Symptoms:** the pod sits at `1/2` with the task container complete and
+`osmo-ctrl` still running. Either it logged
+`Error fetching new jwt token: … i/o timeout` at startup, or it printed
+`Uploading s3://…` and stopped there.
+
+**Cause:** the pod cannot reach the STS endpoint. If this VPC has **interface**
+endpoints with private DNS, a pod resolves those service names through CoreDNS and
+the VPC resolver, gets the endpoint's *private* addresses, and routes to them over
+the tunnel — where the endpoint security group decides. IRSA exchanges a projected
+token at STS, so with STS unreachable the exchange hangs rather than failing, and
+the task looks alive.
+
+The node hides this: it resolves through its own network's resolver, gets public
+addresses, and pulls images perfectly well. Only pods take the private path.
+
+**Solution:** the endpoint security group must admit the hybrid node and pod CIDRs
+on 443, which enabling hybrid nodes does. Confirm from a pod on the node — resolve
+an endpoint's service name and check whether the address is private, then try to
+connect:
+```bash
+kubectl exec <pod> -- nslookup sts.<region>.amazonaws.com
+kubectl exec <pod> -- wget -q -O /dev/null -T 20 https://sts.<region>.amazonaws.com/
+```
+Note S3 is typically a *gateway* endpoint, which keeps public addresses, so S3
+working is not evidence that STS does.
+
+#### Traffic from a pod on a hybrid node is dropped when it works on cloud nodes
+
+**Cause:** NetworkPolicy is enforced by the CNI, and the two CNIs in a mixed
+cluster do not agree on whether to enforce. The VPC CNI ships a policy agent but
+enforces only when explicitly enabled; Cilium enforces by default. So policies that
+are inert everywhere else become real on the hybrid node alone.
+
+The mismatch also makes the policies themselves wrong there: a rule selecting
+CoreDNS by `namespaceSelector` cannot match a pod dialling the CoreDNS ClusterIP,
+because kube-proxy translates the service address and Cilium evaluates policy
+before that translation.
+
+**Solution:** keep the two consistent. This repo installs Cilium with
+`policyEnforcementMode: never` to match a cluster that does not enforce policy on
+its cloud nodes. If you enable enforcement, enable it on both and express DNS rules
+so they match a ClusterIP destination.
+
+#### A change to Cilium's Helm values has no effect
+
+**Cause:** `helm upgrade` updates the ConfigMap, but the agent reads much of its
+configuration at startup. The running DaemonSet keeps the old value, and
+`cilium-dbg config` shows what it is really using — which is the thing to check
+before concluding the value does not work.
+
+**Solution:** `kubectl rollout restart ds/cilium -n kube-system`.
+
 #### Pods on a hybrid node stick in `Terminating`
 
 **Cause:** on Ubuntu, the containerd AppArmor defect fixed in containerd 1.7.19. It

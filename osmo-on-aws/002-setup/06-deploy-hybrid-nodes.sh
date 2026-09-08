@@ -150,6 +150,14 @@ do_create_activation() {
   info "docs/hybrid-nodes-so101.md for the nodeConfig.yaml it goes into."
 }
 
+# OSMO asks for the NVIDIA runtime on every task pod, so a platform on a GPU-less
+# machine has to name a runtime that node actually has. Cluster-scoped and
+# idempotent, so applying it repeatedly is free.
+do_apply_runtime_class() {
+  info "Ensuring the default OCI runtime is nameable by a pod"
+  kubectl apply -f "$SCRIPT_DIR/manifests/runtimeclass-runc.yaml"
+}
+
 do_install_cilium() {
   local pod_cidr="$1" mtu="$2"
 
@@ -242,6 +250,7 @@ main() {
   fi
 
   connect_eks "$region" "$cluster_name"
+  do_apply_runtime_class
   do_install_cilium "$pod_cidr" "$tunnel_mtu"
 
   section "Hybrid Nodes Setup Complete"

@@ -71,6 +71,24 @@ loadBalancer:
 envoy:
   enabled: false
 
+# NetworkPolicy is left unenforced here, to match what the rest of the cluster
+# actually does rather than what its manifests say.
+#
+# The VPC CNI ships a policy agent but only enforces when explicitly enabled, and
+# this deployment does not enable it — so the NetworkPolicies in the workflow
+# namespace are inert on cloud nodes. Cilium, by contrast, enforces by default.
+# Leaving it on would make one node the only place policy applies, and those
+# policies permit egress on 443 alone: a task talking to a policy server on any
+# other port is silently dropped on the hybrid node and works everywhere else.
+# That is the worst possible shape for a bug — it looks like the tunnel.
+#
+# If this deployment ever enables VPC CNI policy enforcement, turn this on with
+# it, and fix the DNS rules at the same time. They select CoreDNS by
+# namespaceSelector, which cannot match a pod dialling the CoreDNS ClusterIP:
+# kube-proxy translates the service address, and Cilium evaluates policy before
+# that translation, so it sees an address belonging to no pod.
+policyEnforcementMode: "never"
+
 # kube-proxy is a pinned EKS add-on and runs on hybrid nodes too, so Cilium must
 # not replace it. Leaving it in place is also what makes ClusterIP Services and
 # CoreDNS resolve from the hybrid node, which is what lets a task there address

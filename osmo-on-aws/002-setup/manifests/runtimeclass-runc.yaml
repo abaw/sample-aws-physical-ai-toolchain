@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# The default OCI runtime, named so a pod can ask for it.
+#
+# OSMO generates every workflow task pod with runtimeClassName: nvidia, which is
+# right for a GPU node and fatal on a node without the NVIDIA container runtime
+# installed: the pod is scheduled, then never gets a sandbox, failing repeatedly
+# with `no runtime for "nvidia" is configured`. The field cannot simply be blanked
+# in a pod template — the API server rejects an empty runtime class name — so a
+# GPU-less platform needs a real runtime class to name instead.
+#
+# `runc` is containerd's own default runtime name, so this resolves on any node
+# with a stock containerd configuration.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: runc
+handler: runc

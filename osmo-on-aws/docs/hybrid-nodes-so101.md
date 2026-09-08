@@ -290,6 +290,11 @@ pull permission.
 
 **Serial device busy.** A stale process on the host still holds it.
 
+**A workflow task on the node never starts, or hangs after its script finishes.**
+See `docs/troubleshooting.md` — the two causes are the NVIDIA runtime class OSMO
+puts on every task pod, and pods being unable to reach the STS endpoint that IRSA
+depends on. Neither is visible from the node itself.
+
 For any of these once the node is registered, start with
 `sudo ./nodeadm debug -c file://nodeConfig.yaml`: it checks AWS API reachability,
 that the role's credentials can be obtained, that the cluster endpoint and its

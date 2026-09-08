@@ -112,12 +112,23 @@ resource "aws_security_group" "vpc_endpoints" {
   description = "Security group for VPC endpoints"
   vpc_id      = module.vpc.vpc_id
 
+  # The hybrid CIDRs are here because these endpoints have private DNS enabled,
+  # which makes them the only way a pod on a hybrid node can reach the services
+  # behind them. Such a pod resolves through CoreDNS and therefore the VPC
+  # resolver, so it gets the endpoint's private addresses and routes to them
+  # through the tunnel — where this group is what accepts or drops it.
+  #
+  # IRSA is what makes this load-bearing: a pod exchanges its projected token at
+  # STS, and with no route to STS the exchange hangs rather than failing, so a
+  # task looks like it is working and never finishes. Note the node itself is
+  # unaffected and so hides the problem: it resolves through its own network's
+  # resolver, gets public addresses, and pulls images perfectly well.
   ingress {
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
-    description = "HTTPS from VPC"
+    cidr_blocks = concat([var.vpc_cidr], var.deploy_hybrid_nodes ? concat(var.hybrid_node_cidrs, var.hybrid_pod_cidrs) : [])
+    description = "HTTPS from the VPC and any hybrid networks"
   }
 
   egress {
