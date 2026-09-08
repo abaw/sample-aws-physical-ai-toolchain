@@ -217,7 +217,11 @@ What the client does, and why each item is there:
 | Every commanded value clamped to the calibrated range, less a margin | The calibrated range is narrower than the servo range, so an out-of-range action would drive into a mechanical hard stop |
 | Per-step cap on how far a joint may be commanded from where it actually is | Bounds a single wild action to a slow move instead of a snap |
 | Servo acceleration and speed capped well below LeRobot's teleoperation defaults | A bad target arrives slowly enough to react to |
-| Return-to-start and torque release in a `finally`, plus `SIGTERM`/`SIGINT`/`SIGHUP` handlers | **The real hazard is not a wrong action — it is the task dying while the arm holds a pose.** A cancelled workflow, a drained node or a lost tunnel must all end with the arm limp |
+| Return-to-start and torque release on every exit path, plus `SIGTERM`/`SIGINT`/`SIGHUP` handlers | **The real hazard is not a wrong action — it is the task dying while the arm holds a pose.** A cancelled workflow, a drained node or a lost tunnel must all end with the arm limp |
+| Torque-off is **read back off the servos** and retried until confirmed | A Feetech write can fail transiently, and a servo that browns out mid-sequence returns with its EEPROM default — which on this arm is torque *enabled*. An unverified release is not a release |
+| Torque-off is attempted whether or not the engage succeeded | A part-way engage leaves torque indeterminate, which is precisely when release must not be skipped |
+| The engage sequence is retried, forcing torque off between attempts | The bus drops a packet often enough to see it; a half-applied engage must not become a held pose |
+| The return ramp **waits for the arm to arrive** before dropping torque | Sending the last goal is not reaching it. With speed capped for safety the arm is still travelling, so releasing immediately leaves it wherever it got to |
 | The servos' own EEPROM is asserted equal to the recording calibration | A policy trained in one calibrated joint frame and executed in another drives confidently to the wrong pose, with a workflow that reports success |
 | Our unit conversion is checked against LeRobot's on the live arm before torque | Same failure, one level lower: a units bug here is silent |
 | The whole policy path is exercised — observation, server validation, chunk length, action range — *before* torque | If any of it is wrong, the run ends with the arm untouched |
@@ -454,7 +458,7 @@ scales a node group up or down for you.
 | 02 fine-tune | Validated at 10,000 steps | Loss 1.141 → 0.018 in 5 h 52 m; all five retained checkpoints verified against their manifests |
 | 03 open-loop eval | Validated | Against 10-step, 6,000-step and 10,000-step checkpoints — the metric separates them by two orders of magnitude |
 | 04 HIL, `no_motion` rehearsal | Validated on real hardware | Both tasks gang-scheduled, the client resolved the policy task's host and connected, EEPROM matched the recording calibration, unit conversion agreed with LeRobot on all six joints, both cameras opened at the dataset's resolution, and the loop ran 29 replans over 30 s with zero writes to the servo bus |
-| 04 HIL, powered episode | **Not yet validated** | Torque has never been enabled from this workflow |
+| 04 HIL, powered episode | Validated on real hardware | One 15 s episode at capped speed: torque engaged holding the present pose, the policy drove the arm closed-loop for 254 steps over 16 replans at 16.9 Hz, the arm returned to within 1 deg of its start pose on every joint, and torque was released and verified off on all six |
 | 04 HIL, `inference_site=edge` | **Not validated, and cannot be here** | Needs a GPU on the edge machine and a platform this repo does not create |
 | 04 HIL, 30 Hz closed loop | **Not reachable over this WAN** | 15.2 Hz at the default horizon. Not payload-bound and not inference-bound — see the latency section |
 
@@ -486,6 +490,9 @@ image, so the commit it pins is changed in one place. That file is injected by e
 | Stage 04 aborts with "did not answer within N ms" on a healthy network | `policy_timeout_ms` is below your round-trip p99 | Read `chunk_latency` from a `no_motion` run and set the timeout above its p99 |
 | Stage 04 refuses to start: "the servos' EEPROM does not match the calibration file" | The arm has been recalibrated since the dataset was recorded, so the policy's joint frame is not this arm's | Find the original calibration. Recalibrating does not fix it — a fresh calibration is a *different* joint space |
 | Stage 04 warns that the resting pose is outside the safety envelope | The arm is resting past where it was calibrated to sweep | Harmless — the first actions are clamped — but move the arm into the workspace the episodes covered, or the policy is extrapolating from a pose it never saw |
+| Stage 04 fails with `Failed to write 'Lock' ... There is no status packet!` | A transient servo-bus failure. It has been seen inside LeRobot's `configure()`, whose `torque_disabled()` context re-enables torque from a `finally` — so a failure there can leave torque on | The client retries the engage and forces torque off between attempts. If it persists, check the arm's supply: the symptom is consistent with a servo browning out and rebooting |
+| Stage 04 ends with the arm limp but not where it started | The return ramp finished sending goals before the arm arrived | Raise `release_settle_s`. `return_residual` in `results.json` is how far short it stopped |
+| `results.json` says `torque_released: false` | Software could not confirm the servos are de-energised | **Cut power to the arm.** Then read `final_torque_state` to see which joints |
 | A device is present inside the task, correctly owned, and cannot be opened | The container device cgroup | `privileged: true` on the task; the platform's `privileged_allowed` only grants the possibility |
 | `osmo workflow validate` fails on Jinja where `--dry-run` passed | `validate` runs the full server-side render; `--dry-run` is a weaker single pass | Trust `validate`. In particular, a literal Jinja tag inside a comment survives `--dry-run` and fails `validate` |
 

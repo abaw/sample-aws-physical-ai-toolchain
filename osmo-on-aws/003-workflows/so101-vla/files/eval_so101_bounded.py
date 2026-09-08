@@ -231,13 +231,18 @@ class ArmDriver:
     reachable physical e-stop are for.
     """
 
-    def __init__(self, robot, envelope: SafetyEnvelope, *, no_motion: bool):
+    def __init__(
+        self, robot, envelope: SafetyEnvelope, *, no_motion: bool, settle_timeout_s: float = 6.0
+    ):
         self.robot = robot
         self.bus = robot.bus
         self.envelope = envelope
         self.no_motion = no_motion
         self.engaged = False
         self.last_commanded: dict[str, float] | None = None
+        self.final_torque_state: dict[str, int] = {}
+        self.settle_timeout_s = settle_timeout_s
+        self.return_residual: float | None = None
 
     def verify_units(self) -> dict:
         """Check our normalization against LeRobot's, on the live arm, before torque.
@@ -273,24 +278,98 @@ class ArmDriver:
         """Joint positions plus one frame per camera, in the units the policy speaks."""
         return self.robot.get_observation()
 
-    def engage(self, acceleration: int, speed: int) -> None:
-        """Enable torque holding the present pose. Nothing moves."""
+    def torque_state(self) -> dict[str, int]:
+        return self.bus.sync_read("Torque_Enable", normalize=False)
+
+    def force_torque_off(self, attempts: int = 4) -> dict[str, int]:
+        """Drop torque and **verify** it, retrying. Never raises.
+
+        Verified rather than assumed, because this is the one operation the whole file
+        exists to guarantee. Two things make a single unverified write insufficient: a
+        Feetech write can fail transiently at 1 Mbaud, and a servo that browns out during
+        a write sequence comes back with its EEPROM default — which on this arm is torque
+        *enabled*. So a release that is not read back is not a release.
+        """
+        state: dict[str, int] = {}
+        for attempt in range(attempts):
+            try:
+                self.bus.disable_torque(num_retry=2)
+            except Exception as exc:  # noqa: BLE001 - keep going, then check
+                print(
+                    f"WARNING: disable_torque attempt {attempt + 1} failed: {exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            try:
+                state = self.torque_state()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"WARNING: could not read back torque state: {exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(0.2)
+                continue
+            if all(v == 0 for v in state.values()):
+                self.engaged = False
+                return state
+            still_on = [j for j, v in state.items() if v]
+            print(
+                f"WARNING: torque still enabled on {still_on} after attempt "
+                f"{attempt + 1}/{attempts}; retrying",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(0.2)
+        return state
+
+    def engage(self, acceleration: int, speed: int, attempts: int = 3) -> None:
+        """Enable torque holding the present pose. Nothing moves.
+
+        Retried, because the servo bus fails transiently and this sequence is where it
+        matters: a half-applied engage leaves torque indeterminate on an arm nobody is
+        driving yet. Each failure forces torque off and verifies before trying again.
+        """
         if self.no_motion:
             self.last_commanded = self.present()
             print("no-motion: torque NOT enabled, no action will be sent", flush=True)
             return
 
-        # Torque off first: a previous run may have left it on, in which case the arm is
-        # holding a goal and "present" would be that goal rather than a resting pose.
-        self.bus.disable_torque()
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                self._engage_once(acceleration, speed)
+                return
+            except (ConnectionError, OSError) as exc:
+                last_exc = exc
+                print(
+                    f"WARNING: engage attempt {attempt + 1}/{attempts} failed on the servo "
+                    f"bus: {exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                self.force_torque_off()
+                time.sleep(0.5)
+        raise Abort(f"could not enable torque safely after {attempts} attempts: {last_exc!r}")
+
+    def _engage_once(self, acceleration: int, speed: int) -> None:
+        # Torque off first, but only if it is actually on: a previous run may have left it
+        # holding a goal, in which case "present" would be that goal rather than a resting
+        # pose. Skipping the redundant case halves the writes in this sequence, and this
+        # sequence is where the bus has been seen to drop one — `configure()` disables
+        # again on its own way in, so nothing is lost.
+        if any(self.torque_state().values()):
+            self.bus.disable_torque(num_retry=2)
         present = self.present()
         self.bus.sync_write("Goal_Position", present)
 
         # Re-enables torque on the way out, now onto a goal equal to the present pose.
+        # Note it re-enables from a `finally`, so a failure inside it can leave torque on
+        # — which is why the caller forces it off between attempts.
         self.robot.configure()
         for joint in JOINTS:
-            self.bus.write("Acceleration", joint, acceleration)
-            self.bus.write("Goal_Velocity", joint, speed)
+            self.bus.write("Acceleration", joint, acceleration, num_retry=2)
+            self.bus.write("Goal_Velocity", joint, speed, num_retry=2)
 
         self.engaged = True
         self.last_commanded = present
@@ -328,6 +407,24 @@ class ArmDriver:
             time.sleep(1.0 / hz)
         self.last_commanded = target
 
+    def settle(self, target: dict[str, float], timeout_s: float, tolerance: float = 2.0) -> float:
+        """Wait for the arm to actually arrive. Returns the worst remaining error.
+
+        Writing a goal is not reaching it. The ramp above finishes when it has *sent* the
+        last goal, and with acceleration and speed capped for safety the arm is still
+        travelling at that point — so dropping torque immediately leaves it wherever it
+        got to, and makes "returns to the pose it started from" false.
+        """
+        deadline = time.perf_counter() + timeout_s
+        worst = float("inf")
+        while time.perf_counter() < deadline:
+            now = self.present()
+            worst = max(abs(now[j] - target[j]) for j in JOINTS)
+            if worst <= tolerance:
+                return worst
+            time.sleep(0.05)
+        return worst
+
     def release(self, home: dict[str, float] | None, seconds: float) -> None:
         """Return to `home` and drop torque. Must not raise, and must not be skipped.
 
@@ -335,13 +432,32 @@ class ArmDriver:
         ``is_connected``, which includes the cameras, so a camera that failed would make
         the release path itself raise — leaving the arm holding a pose, which is the
         failure this whole file is arranged around.
+
+        **Torque-off is attempted whether or not this driver believes it engaged.** An
+        engage that fails part-way leaves torque indeterminate, and that is exactly the
+        moment a release must not be skipped — so only the *return* half is conditional on
+        having engaged. In no-motion mode nothing is written at all, because the run
+        already refused to start if torque was on.
         """
-        if not self.engaged:
+        if self.no_motion:
             return
         try:
-            if home is not None:
+            if self.engaged and home is not None:
                 print("returning to the pose the episode started from...", flush=True)
                 self.ramp_to(home, seconds)
+                residual = self.settle(home, self.settle_timeout_s)
+                self.return_residual = residual
+                if residual <= 2.0:
+                    print(f"back at the start pose (within {residual:.2f})", flush=True)
+                else:
+                    # Capped speed plus this arm's own shortfall, not a fault — but the
+                    # operator should know the arm is not where it began.
+                    print(
+                        f"WARNING: stopped {residual:.1f} short of the start pose after "
+                        f"{self.settle_timeout_s:g}s; releasing torque there",
+                        file=sys.stderr,
+                        flush=True,
+                    )
         except Exception as exc:  # noqa: BLE001 - dropping torque matters more than this
             print(
                 f"WARNING: return-to-start failed ({exc!r}); dropping torque now",
@@ -349,12 +465,19 @@ class ArmDriver:
                 flush=True,
             )
         finally:
-            try:
-                self.bus.disable_torque()
-                self.engaged = False
-                print("torque off", flush=True)
-            except Exception as exc:  # noqa: BLE001
-                print(f"ERROR: could not disable torque: {exc!r}", file=sys.stderr, flush=True)
+            state = self.force_torque_off()
+            self.final_torque_state = state
+            if state and all(v == 0 for v in state.values()):
+                print("torque off, verified on all six joints", flush=True)
+            else:
+                # The arm may still be holding a pose and software has run out of ways to
+                # stop it. Say so in the strongest terms available.
+                print(
+                    f"ERROR: COULD NOT RELEASE TORQUE — read back {state or 'nothing'}. "
+                    f"The arm may still be energised. CUT POWER TO THE ARM.",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -776,6 +899,14 @@ def build_parser() -> argparse.ArgumentParser:
         "that would be sent — but never enable torque. The arm stays limp.",
     )
     g.add_argument("--release-ramp-s", type=float, default=2.0)
+    g.add_argument(
+        "--release-settle-s",
+        type=float,
+        default=6.0,
+        help="How long to wait for the arm to actually arrive at the start pose before "
+        "dropping torque. Sending the last goal is not reaching it, and --speed caps how "
+        "fast it can get there.",
+    )
 
     g = p.add_argument_group("episodes")
     g.add_argument("--lang-instruction", required=True)
@@ -910,9 +1041,29 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
         for joint, (lo, hi) in envelope.limits.items():
             print(f"  {joint:<14} {lo:>8.2f} .. {hi:>8.2f}", flush=True)
 
-        arm = ArmDriver(robot, envelope, no_motion=args.no_motion)
+        arm = ArmDriver(
+            robot, envelope, no_motion=args.no_motion, settle_timeout_s=args.release_settle_s
+        )
         results["units_check"] = arm.verify_units()
         print("unit conversion agrees with LeRobot on all six joints", flush=True)
+
+        entry_torque = arm.torque_state()
+        results["entry_torque"] = entry_torque
+        energised = [j for j, v in entry_torque.items() if v]
+        if energised and args.no_motion:
+            # no-motion promises not to write to the bus at all, so it cannot fix this —
+            # and it must not proceed while the arm is holding a pose it did not command.
+            raise Abort(
+                f"torque is already enabled on {energised}; the arm is energised from an "
+                f"earlier run. Release it before a no-motion rehearsal, which must not "
+                f"write to the servo bus"
+            )
+        if energised:
+            print(
+                f"NOTE: torque was already enabled on {energised} at start; engage will "
+                f"drop it before re-enabling onto the present pose",
+                flush=True,
+            )
 
         outside = envelope.outside(arm.present())
         results["resting_pose_outside_envelope"] = outside
@@ -1047,6 +1198,15 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
             "worst_loop_overrun_ms": round(rate.worst_overrun_ms, 1),
             "clipped_by_joint": dict(envelope.clipped) if envelope else {},
             "no_motion": args.no_motion,
+            # Read back off the servos, not inferred from having asked. This is the field
+            # to check first after any run that ended badly.
+            "final_torque_state": arm.final_torque_state if arm else {},
+            "return_residual": arm.return_residual if arm else None,
+            "torque_released": bool(arm is None or args.no_motion)
+            or (
+                bool(arm.final_torque_state)
+                and all(v == 0 for v in arm.final_torque_state.values())
+            ),
         }
         (output / "results.json").write_text(json.dumps(results, indent=2, default=str) + "\n")
         print("\n" + json.dumps(results["summary"], indent=2), flush=True)

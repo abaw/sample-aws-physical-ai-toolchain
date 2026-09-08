@@ -99,6 +99,10 @@ default-values:
   # The ping and warm-up calls run with the arm limp and include the model's
   # first-inference cost, so they get their own, generous, ceiling.
   policy_setup_timeout_s: 300
+  # Sending the last goal of the return ramp is not reaching it, and `speed` caps how fast
+  # the arm can get there. Without this wait torque drops while it is still travelling and
+  # the arm is left wherever it got to.
+  release_settle_s: 6
   # The group is gang-scheduled, so the client starts at the same moment the server does
   # — and the server has a ~24 Gi checkpoint to download and a 3B model to load first.
   # This is how long the client keeps pinging before it gives up.
@@ -367,6 +371,7 @@ workflow:
             --max-step-gripper {{ max_step_gripper }} \
             --acceleration {{ acceleration }} \
             --speed {{ speed }} \
+            --release-settle-s {{ release_settle_s }} \
             "${EXTRA[@]}" \
             --action-horizon {{ action_horizon }} \
             --control-hz {{ control_hz }} \
