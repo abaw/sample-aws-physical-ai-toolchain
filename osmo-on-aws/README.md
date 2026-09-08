@@ -264,12 +264,19 @@ For more details on profile configuration, see the [OSMO Setup Profile documenta
 | `cosmos_transfer.yaml` | L40S | Full Isaac Sim → Cosmos Transfer2.5 SDG pipeline |
 | `cosmos_transfer_augmentation.yaml` | L40S | Prompt-driven video augmentation with Cosmos Transfer2.5 |
 | `pick_and_place_training.yaml` | Multi-GPU | Reference skeleton for a full pick-and-place pipeline |
-| [`so101-vla/`](003-workflows/so101-vla/README.md) | 1× L40S | **Multi-stage example** — fine-tune a VLA model on SO-101 recordings and evaluate it before it drives hardware |
+| [`so101-vla/`](003-workflows/so101-vla/README.md) | 1× L40S | **Multi-stage example** — fine-tune a VLA model on SO-101 recordings, evaluate it offline, then close the loop on a real arm |
 
-The single-file workflows above are each self-contained. `so101-vla/` is a three-stage pipeline —
-prepare a dataset, fine-tune GR00T N1.7, evaluate the checkpoint offline — and has its own
-[README](003-workflows/so101-vla/README.md) covering prerequisites, submit order, measured resource
-requirements, and how to read the evaluation result. It needs a Hugging Face token credential.
+The single-file workflows above are each self-contained. `so101-vla/` is a four-stage pipeline —
+prepare a dataset, fine-tune GR00T N1.7, evaluate the checkpoint offline, then drive a physical SO-101
+arm with it — and has its own [README](003-workflows/so101-vla/README.md) covering prerequisites,
+submit order, measured resource requirements, and how to read each result. It needs a Hugging Face
+token credential.
+
+Its first three stages need no robot and are a complete cloud pipeline on their own. **Stage 04 is the
+only workflow in this repo that physically actuates hardware**: it gang-schedules a policy server on a
+GPU node beside a robot client on an [EKS Hybrid Node](docs/hybrid-nodes-so101.md) with the arm
+attached, and it requires the opt-in hybrid-node infrastructure. Read that example's safety section
+before submitting it.
 
 ### Getting Started (Recommended Order)
 
@@ -323,7 +330,7 @@ osmo-on-aws/
 │   ├── manifests/         # Kubernetes manifests
 │   └── cleanup/           # Uninstall scripts
 ├── 003-workflows/         # Example workflows
-│   └── so101-vla/         # Multi-stage SO-101 VLA example (see its README)
+│   └── so101-vla/         # Multi-stage SO-101 VLA example, cloud through real arm (see its README)
 │       └── files/         # Scripts injected into tasks at submit time
 └── docs/                  # Documentation
 ```

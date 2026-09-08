@@ -1,0 +1,387 @@
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# so101-vla stage 04 — close the loop: serve a fine-tuned checkpoint on a cloud GPU and
+# drive a real SO-101 follower arm attached to an on-premise node, in one gang-scheduled
+# group.
+#
+# THIS STAGE MOVES PHYSICAL HARDWARE. Read the safety section of README.md before the
+# first submit. The short version: clear the workspace, keep a hand on the power, and
+# rehearse with `--set no_motion=true` first.
+#
+# Requires a hybrid node with the arm attached — see docs/hybrid-nodes-so101.md. Stage 03
+# is the prerequisite gate; do not bring a checkpoint here that has not passed it.
+
+default-values:
+  model: gr00t-n17
+
+  # cloud | edge. `cloud` serves the policy on a GPU node and crosses the WAN twice per
+  # replan; `edge` serves it on the robot's own machine. See README.md: the edge branch
+  # names a platform this repo does not create, because a GPU on a hybrid node needs a
+  # device-plugin design that does not exist here.
+  inference_site: cloud
+
+  # Name a single checkpoint-<step>/ prefix from a stage 02 run, and never the base
+  # model: nvidia/GR00T-N1.7-3B has no new_embodiment entry in its processor and raises
+  # at construction, because that tag exists only for fine-tuning.
+  checkpoint_url: s3://REPLACE-WITH-YOUR-DATASETS-BUCKET/so101-vla/checkpoints/gr00t-n17/REPLACE-WITH-A-RUN-ID/checkpoint-REPLACE-WITH-A-STEP/
+  storage_url: s3://REPLACE-WITH-YOUR-DATASETS-BUCKET/so101-vla
+
+  # --- the task -------------------------------------------------------------
+  # Must match what the dataset was annotated with. The policy conditions on it, so a
+  # paraphrase is a different prompt.
+  lang_instruction: "REPLACE-WITH-YOUR-TASK-DESCRIPTION"
+
+  # Steps of each predicted chunk executed before re-planning, and the rate they are
+  # executed at. 16 at 30 Hz buys 533 ms of motion per round trip.
+  #
+  # 16 is the measured answer, not the predicted one: component measurements (61 ms of
+  # node-to-node ICMP + ~9 ms serialization + 146 ms in-process inference = 216 ms) say
+  # horizon 8 fits, and the real pod-to-pod path costs ~380 ms at the median. 16 is also
+  # the ceiling here, because it is the chunk length the checkpoint was trained with — the
+  # client refuses a larger horizon rather than executing a short chunk. See README.md, and
+  # set this from a no_motion rehearsal on your own link.
+  action_horizon: 16
+  control_hz: 30
+  # Same value stage 03 evaluated at. Fewer steps is faster and slightly less accurate,
+  # and it is the largest single lever on inference latency.
+  denoising_steps: 4
+
+  max_episodes: 1
+  episode_timeout_s: 60
+
+  # --- safety ---------------------------------------------------------------
+  # Rehearsal mode: everything runs, including the policy and the full control loop, and
+  # every action is logged — but torque is never enabled and nothing is sent. Run this
+  # first, every time the setup changes.
+  no_motion: false
+  # Each arm joint's calibrated range is shrunk by this much at both ends. The calibrated
+  # range is already narrower than the servo range; this keeps a clamped action away from
+  # a mechanical limit.
+  joint_margin_deg: 5
+  gripper_margin: 3
+  # Per-step ceiling on how far a joint may be commanded from where it actually is. At
+  # 30 Hz the default is far above this arm's real speed, so it bounds a wild action
+  # without limiting normal motion.
+  max_step_deg: 8
+  max_step_gripper: 15
+  # Servo Acceleration and Goal_Velocity. LeRobot configures 254 for teleoperation
+  # responsiveness; a policy under evaluation does not need it, and a slow bad target is
+  # much better than a fast one.
+  acceleration: 20
+  speed: 600
+  # Receive timeout in the control loop, and how many times a request is retried. On a
+  # timeout the arm holds its last commanded pose; when the retries run out the episode
+  # aborts and the arm is returned and released.
+  #
+  # The worst-case time the arm can hold a stale pose is (policy_retries + 1) x
+  # policy_timeout_ms, so with these values it is 3 s. That arithmetic is the point of
+  # both numbers: upstream's client defaults to a 15 s timeout, which at this loop's round
+  # trip is not a timeout but an outage.
+  #
+  # The timeout must sit above the round-trip p99 for YOUR link or episodes will abort on
+  # healthy network jitter. Measured p99 is ~890 ms and max ~1020 ms, and at 1000 one
+  # request in fifty timed out and had to be retried; see README.md.
+  policy_timeout_ms: 1500
+  policy_retries: 1
+  # The ping and warm-up calls run with the arm limp and include the model's
+  # first-inference cost, so they get their own, generous, ceiling.
+  policy_setup_timeout_s: 300
+  # The group is gang-scheduled, so the client starts at the same moment the server does
+  # — and the server has a ~24 Gi checkpoint to download and a 3B model to load first.
+  # This is how long the client keeps pinging before it gives up.
+  policy_wait_s: 1800
+
+  # Optional: six values in joint order, ramped to at the start of every episode. Without
+  # it the arm starts from wherever it is, which makes repeated episodes incomparable.
+  # A pose from the middle of your recording is a good choice — the policy has seen it.
+  home_pose: ""
+  home_ramp_s: 4
+
+  # --- the machine ----------------------------------------------------------
+  # Per-machine facts, not properties of this example. Survey them on your own node: a
+  # serial device's number depends on plug order, and two identical cameras produce an
+  # identical /dev/v4l/by-id string, so by-path is the only stable handle.
+  robot_port: /dev/ttyACM0
+  front_camera: /dev/video2
+  wrist_camera: /dev/video4
+  camera_width: 640
+  camera_height: 480
+  camera_fps: 30
+  # LeRobot looks for <robot_id>.json under the calibration directory.
+  robot_id: follower
+  # Optional path, relative to this file, to the LeRobot calibration JSON the dataset was
+  # recorded with. When set, the servos' own EEPROM is asserted equal to it before torque
+  # — the strongest check that the arm is in the joint frame the policy was trained in.
+  # When empty the calibration is read from the servos, where LeRobot also stores it.
+  calibration_localpath: ""
+
+  # --- resources ------------------------------------------------------------
+  policy_platform: l40s
+  # Not created by this repo. See README.md.
+  edge_policy_platform: so101-edge-gpu
+  robot_platform: so101-edge
+  policy_port: 5555
+
+  policy_cpu: 4
+  policy_memory_gi: 32
+  # A stage 02 checkpoint is ~24 Gi, over half of which is optimizer state the server
+  # never reads — OSMO downloads the whole prefix regardless.
+  checkpoint_size_gi: 25
+  # Toolchain venv (~15 Gi) + the base model pulled by the processor (~15 Gi).
+  policy_storage_gi: 40
+
+  # The machine has ~6 usable vCPU and `cpu` must be an integer, and the osmo-ctrl
+  # sidecar adds a fixed 1 on top of whatever is asked for.
+  robot_cpu: 1
+  robot_memory_gi: 6
+  robot_storage_gi: 10
+
+  policy_image: nvcr.io/nvidia/pytorch:25.04-py3
+  client_image: public.ecr.aws/docker/library/python:3.12-slim
+
+  # LeRobot at the commit the recording machine has checked out, which is what produced
+  # the dataset this checkpoint was fine-tuned on. The calibrated joint space is defined
+  # by this code, so the pin is a correctness constraint, not hygiene.
+  lerobot_commit: 9021d2d24036e048b455d55919630e6e97394830
+  # Kept equal to files/gr00t/install_n17.sh, so the client's PolicyClient speaks the
+  # same wire protocol the server does.
+  groot_commit: 1a1837f20538b7d7e21f977a11a5aee14f99803c
+  torch_version: 2.10.0
+  torchvision_version: 0.25.0
+  transformers_version: 5.16.1
+  # The wire format. Pinned to gr00t's own versions at groot_commit, since these are what
+  # encode the observation on its way to the server.
+  pyzmq_version: 27.0.1
+  msgpack_version: 1.1.0
+  msgpack_numpy_version: 0.4.8
+
+  # A bound on a task that physically moves a robot. The pool default is 7d.
+  exec_timeout: 1h
+
+workflow:
+  name: so101-{{ model }}-hil-eval
+  resources:
+    policy:
+{% if inference_site == 'edge' %}
+      platform: "{{ edge_policy_platform }}"
+{% else %}
+      platform: "{{ policy_platform }}"
+{% endif %}
+      gpu: 1
+      cpu: {{ policy_cpu }}
+      memory: {{ policy_memory_gi }}Gi
+      storage: {{ policy_storage_gi + checkpoint_size_gi }}Gi
+    robot:
+      platform: "{{ robot_platform }}"
+      cpu: {{ robot_cpu }}
+      memory: {{ robot_memory_gi }}Gi
+      storage: {{ robot_storage_gi }}Gi
+
+  groups:
+  # One group, so OSMO gang-schedules both tasks. The robot cannot usefully start before
+  # the server, and a half-started group would leave the arm connected with nothing
+  # driving it.
+  - name: hil
+    tasks:
+    - name: policy-server
+      image: "{{ policy_image }}"
+      resource: policy
+      credentials:
+        huggingface_token:
+          HF_TOKEN: token
+      inputs:
+      - url: {{ checkpoint_url }}
+      files:
+      - localpath: files/gr00t/install_n17.sh
+        path: /tmp/install_n17.sh
+      - localpath: files/gr00t/serve_policy.py
+        path: /tmp/serve_policy.py
+      command: [bash, -c]
+      args:
+        - |
+          set -euo pipefail
+
+          # ffmpeg is not used to serve a policy — the frames arrive over the wire — but
+          # install_n17.sh verifies its own toolchain by importing torchcodec, which
+          # cannot load its shared library without one. git-lfs is needed by the install
+          # script itself.
+          apt-get update -qq
+          apt-get install -y -qq git git-lfs ffmpeg
+
+          # Exports GROOT_DIR and puts the venv on PATH.
+          source /tmp/install_n17.sh
+
+          # A single checkpoint prefix is already a model directory; a run prefix holds
+          # them as subdirectories. -V because a lexical sort puts checkpoint-900 after
+          # checkpoint-1000.
+          if [ -f "{{input:0}}/config.json" ]; then
+            CKPT="{{input:0}}"
+          else
+            CKPT="$(find {{input:0}} -type d -name 'checkpoint-*' | sort -V | tail -1)"
+          fi
+          if [ -z "${CKPT}" ]; then
+            echo "ERROR: no checkpoint directory under {{input:0}}" >&2
+            find {{input:0}} -maxdepth 3 -type d >&2
+            exit 1
+          fi
+          echo "checkpoint: ${CKPT}"
+
+          # A checkpoint without normalization statistics loads without complaint and
+          # then predicts at the wrong scale. On an arm that is not a bad plot, it is
+          # motion, so this is a hard gate rather than a warning.
+          if [ ! -f "${CKPT}/experiment_cfg/dataset_statistics.json" ]; then
+            echo "ERROR: ${CKPT} has no experiment_cfg/dataset_statistics.json — the training run did not publish a complete checkpoint" >&2
+            exit 1
+          fi
+
+          cd "${GROOT_DIR}"
+          exec python /tmp/serve_policy.py \
+            --model-path "${CKPT}" \
+            --embodiment-tag new_embodiment \
+            --host 0.0.0.0 \
+            --port {{ policy_port }} \
+            --denoising-steps {{ denoising_steps }}
+
+    - name: robot-client
+      # lead: true on the client, not the server. The client is the thing that finishes;
+      # the server would run forever. Its exit ends the group and tears the GPU task down
+      # with it, so a finished eval does not leave a GPU burning.
+      lead: true
+      image: "{{ client_image }}"
+      resource: robot
+      # Without it every device open fails on the container device cgroup, while the
+      # device itself looks present and correctly owned.
+      privileged: true
+      volumeMounts:
+        - "{{ robot_port }}"
+        - "{{ front_camera }}"
+        - "{{ wrist_camera }}"
+      outputs:
+      - url: {{ storage_url }}/hil/{{ model }}/{{workflow_id}}/
+      files:
+      - localpath: files/eval_so101_bounded.py
+        path: /tmp/eval_so101_bounded.py
+{% if calibration_localpath %}
+      - localpath: {{ calibration_localpath }}
+        path: /tmp/calibration/{{ robot_id }}.json
+{% endif %}
+      command: [bash, -c]
+      args:
+        - |
+          set -euo pipefail
+
+          # Output URLs are not validated at submit time, so without this a forgotten
+          # --set fails at upload, after the arm has already moved.
+          case "{{ storage_url }}" in
+            *REPLACE-WITH-*)
+              echo "ERROR: pass --set storage_url=s3://<your-datasets-bucket>/so101-vla" >&2
+              exit 2 ;;
+          esac
+          case "{{ lang_instruction }}" in
+            *REPLACE-WITH-*)
+              echo "ERROR: pass --set lang_instruction='<the task text your dataset was annotated with>'" >&2
+              exit 2 ;;
+          esac
+
+          # CPU wheels deliberately. lerobot imports torch transitively
+          # (motors_bus -> lerobot.utils -> device_utils) so it cannot be skipped, and the
+          # CUDA build is ~2.5 GB of no use on a machine with no GPU — which matters when
+          # the download crosses a lab's own internet link.
+          pip install --quiet --root-user-action=ignore \
+            --index-url https://download.pytorch.org/whl/cpu \
+            "torch=={{ torch_version }}" "torchvision=={{ torchvision_version }}"
+
+          # Source tarballs, not git+: this image has no git, and a tarball is a ~10 MB
+          # fetch against a full clone.
+          #
+          # One resolve, not several. transformers and lerobot disagree about
+          # huggingface-hub, and installing them separately lets the second one silently
+          # downgrade the first one's dependency; resolved together, pip picks a
+          # transformers that accepts the hub version lerobot needs.
+          #
+          # transformers is here only because gr00t's policy package imports Gr00tPolicy
+          # at package level, so it is reached even though this task never builds a model.
+          # The three wire libraries are pinned to the versions gr00t itself pins, because
+          # they are what encodes the observation on the way to the server.
+          pip install --quiet --root-user-action=ignore \
+            "lerobot[feetech] @ https://github.com/huggingface/lerobot/archive/{{ lerobot_commit }}.tar.gz" \
+            "transformers=={{ transformers_version }}" \
+            "pyzmq=={{ pyzmq_version }}" \
+            "msgpack=={{ msgpack_version }}" \
+            "msgpack-numpy=={{ msgpack_numpy_version }}"
+
+          # --no-deps: only gr00t's PolicyClient is wanted, not the training stack. Its
+          # own pins for numpy and torch are deliberately not honoured — they predate
+          # lerobot's, which this arm's calibrated joint space depends on.
+          pip install --quiet --root-user-action=ignore --no-deps \
+            "gr00t @ https://github.com/NVIDIA/Isaac-GR00T/archive/{{ groot_commit }}.tar.gz"
+
+          # Conditional flags go into an array rather than into the command's own
+          # backslash continuation. A conditional block that renders to nothing still
+          # leaves a blank line behind, and a blank line after a trailing backslash ends
+          # the command early instead of continuing it — so the arguments after it would
+          # be silently dropped.
+          EXTRA=()
+{% if calibration_localpath %}
+          EXTRA+=(--calibration-dir /tmp/calibration)
+{% endif %}
+{% if no_motion | string | lower == 'true' %}
+          EXTRA+=(--no-motion)
+{% endif %}
+{% if home_pose %}
+          EXTRA+=(--home-pose "{{ home_pose }}" --home-ramp-s {{ home_ramp_s }})
+{% endif %}
+          echo "extra arguments: ${EXTRA[*]-none}"
+
+          # pipefail is set, so the eval still fails the task despite the tee.
+          python /tmp/eval_so101_bounded.py \
+            --policy-host {{host:policy-server}} \
+            --policy-port {{ policy_port }} \
+            --policy-timeout-ms {{ policy_timeout_ms }} \
+            --policy-setup-timeout-s {{ policy_setup_timeout_s }} \
+            --policy-wait-s {{ policy_wait_s }} \
+            --policy-retries {{ policy_retries }} \
+            --robot-port {{ robot_port }} \
+            --robot-id {{ robot_id }} \
+            --front-camera {{ front_camera }} \
+            --wrist-camera {{ wrist_camera }} \
+            --camera-width {{ camera_width }} \
+            --camera-height {{ camera_height }} \
+            --camera-fps {{ camera_fps }} \
+            --joint-margin-deg {{ joint_margin_deg }} \
+            --gripper-margin {{ gripper_margin }} \
+            --max-step-deg {{ max_step_deg }} \
+            --max-step-gripper {{ max_step_gripper }} \
+            --acceleration {{ acceleration }} \
+            --speed {{ speed }} \
+            "${EXTRA[@]}" \
+            --action-horizon {{ action_horizon }} \
+            --control-hz {{ control_hz }} \
+            --max-episodes {{ max_episodes }} \
+            --episode-timeout-s {{ episode_timeout_s }} \
+            --lang-instruction "{{ lang_instruction }}" \
+            --output-dir {{output}} 2>&1 | tee {{output}}/hil_eval.log
+
+          # The task runs as root, the uploading sidecar does not, so anything written
+          # via tempfile is mode 0600 and silently unreadable to it — logged as a per-file
+          # error, then reported as uploaded.
+          chmod -R a+rX {{output}}
+          echo "published to {{ storage_url }}/hil/{{ model }}/{{workflow_id}}/"
+          # Check the published prefix against this count; see the chmod note above.
+          echo "files to upload: $(find {{output}} -type f | wc -l)"
+
+  timeout:
+    exec_timeout: {{ exec_timeout }}
