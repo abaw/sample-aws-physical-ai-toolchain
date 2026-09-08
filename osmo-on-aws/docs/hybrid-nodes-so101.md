@@ -233,11 +233,53 @@ pod CIDR.
 
 ## 9. Device plumbing
 
-Add a udev rule pinning each serial device to a stable name by USB serial number;
-`/dev/ttyACM0` versus `ACM1` otherwise depends on plug order. A USB camera typically
-claims **two** `/dev/video*` nodes — one is the stream, the other metadata — so
-identify which is which and mount both. Record the resolved paths; they become the
-platform's allowed mounts and the workflow's `volumeMounts`.
+Serial and camera devices are numbered in the order the kernel finds them, so
+`/dev/ttyACM0` versus `ACM1` depends on plug order. Identify each device by
+something stable before writing it into a workflow.
+
+**Serial devices** carry a USB serial number, so `/dev/serial/by-id/` distinguishes
+them:
+
+```console
+$ ls -l /dev/serial/by-id/
+usb-1a86_USB_Single_Serial_XXXXXXXXXX-if00 -> ../../ttyACM0
+usb-1a86_USB_Single_Serial_YYYYYYYYYY-if00 -> ../../ttyACM1
+```
+
+For a leader/follower pair, both are the same adapter with the same six servos, so
+the serial number alone does not say which arm is which. **Supply voltage does**, and
+reading it needs no motion: a follower runs from a 12 V supply, a leader is bus-powered
+at 5 V. Reading each servo's voltage register is a read-only bus operation.
+
+**Cameras are harder, because identical models share an identical `by-id` string** —
+the descriptor carries no serial number, so the two symlinks collide and only one
+appears. Use `/dev/v4l/by-path/` instead, which is derived from the USB port and
+therefore stable as long as nothing is re-plugged.
+
+Each camera also claims **two** `/dev/video*` nodes, and only one carries frames:
+
+```console
+$ v4l2-ctl -d /dev/videoN --all | grep -A2 'Device Caps'
+                Video Capture      # this one
+                Metadata Capture   # not this one
+```
+
+Which of a pair is which is not fixed either, so check rather than assume the lower
+number. Finally, tell the two cameras apart by **looking at a frame** — capture one
+from each and see which shows the workspace and which looks out past the gripper:
+
+```bash
+ffmpeg -f v4l2 -input_format mjpeg -video_size 1280x720 -i /dev/videoN -frames:v 1 out.jpg
+```
+
+Record the resolved paths: they become the platform's `allowed_mounts` and the
+workflow's `volumeMounts`.
+
+**A task must run privileged to use any of them.** The platform grants
+`privileged_allowed`, and the task has to ask for `privileged: true`. Without it the
+device appears in the container with correct ownership and every open fails, because
+the container device cgroup blocks it — which reads as a broken device rather than a
+missing permission.
 
 ## 10. Detach and re-attach
 

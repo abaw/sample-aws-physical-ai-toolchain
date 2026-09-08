@@ -287,6 +287,10 @@ services:
             # Character devices need it in practice. The blast radius is one
             # single-purpose machine, which is why the node is tainted.
             privileged_allowed: true
+            # A camera claims two /dev/video* nodes — one Video Capture, one
+            # Metadata Capture — so the count is twice the number of cameras and
+            # only the even members of each pair carry frames. Six covers a
+            # built-in webcam plus two external cameras in any enumeration order.
             allowed_mounts:
               - /dev/ttyACM0
               - /dev/ttyACM1
@@ -294,6 +298,8 @@ services:
               - /dev/video1
               - /dev/video2
               - /dev/video3
+              - /dev/video4
+              - /dev/video5
             override_pod_template:
               - so101_edge
 
