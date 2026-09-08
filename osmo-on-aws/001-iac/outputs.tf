@@ -322,6 +322,25 @@ output "alb_security_group_id" {
 }
 
 #------------------------------------------------------------------------------
+# Hybrid Nodes
+#------------------------------------------------------------------------------
+
+output "hybrid_nodes_role_arn" {
+  description = "Hybrid Nodes IAM role ARN (null when hybrid nodes are off)"
+  value       = module.eks.hybrid_nodes_role_arn
+}
+
+output "hybrid_nodes_role_name" {
+  description = "Hybrid Nodes IAM role name, which is what aws ssm create-activation --iam-role takes"
+  value       = module.eks.hybrid_nodes_role_name
+}
+
+output "hybrid_nodes_activation_tag" {
+  description = "Tag an SSM hybrid activation must carry for the node role's ssm:DeregisterManagedInstance condition to match"
+  value       = module.eks.hybrid_nodes_activation_tag
+}
+
+#------------------------------------------------------------------------------
 # Hybrid VPN Gateway
 #------------------------------------------------------------------------------
 

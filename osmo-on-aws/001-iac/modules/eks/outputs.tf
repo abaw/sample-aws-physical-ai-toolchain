@@ -50,6 +50,28 @@ output "node_security_group_id" {
 }
 
 #------------------------------------------------------------------------------
+# Hybrid Node Outputs
+#------------------------------------------------------------------------------
+
+output "hybrid_nodes_role_arn" {
+  description = "Hybrid Nodes IAM role ARN (null when hybrid nodes are off)"
+  value       = try(aws_iam_role.hybrid_nodes[0].arn, null)
+}
+
+output "hybrid_nodes_role_name" {
+  description = "Hybrid Nodes IAM role name, which is what aws ssm create-activation --iam-role takes"
+  value       = try(aws_iam_role.hybrid_nodes[0].name, null)
+}
+
+output "hybrid_nodes_activation_tag" {
+  description = "Tag an SSM hybrid activation must carry for the node role's ssm:DeregisterManagedInstance condition to match"
+  value = local.hybrid_nodes_enabled ? {
+    key   = local.hybrid_nodes_activation_tag_key
+    value = local.hybrid_nodes_activation_tag_value
+  } : null
+}
+
+#------------------------------------------------------------------------------
 # Node Group Outputs
 #------------------------------------------------------------------------------
 

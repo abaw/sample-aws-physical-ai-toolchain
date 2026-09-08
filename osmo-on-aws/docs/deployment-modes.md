@@ -305,6 +305,32 @@ minute without replacing the instance. The same timer is why a boot that raced
 the elastic IP association recovers on its own. There is no inbound SSH; use
 Session Manager, and `journalctl -u hybrid-vpn-sync` for what it did.
 
+### Node credentials
+
+A cloud node authenticates with the credentials its instance profile serves over
+IMDS. A machine outside AWS has no IMDS, so it assumes an IAM role through an SSM
+hybrid activation instead. Enabling `should_deploy_hybrid_nodes` creates that role
+and the EKS access entry that maps it to node RBAC:
+
+```bash
+terraform output -raw hybrid_nodes_role_name
+```
+
+The activation itself is deliberately **not** a Terraform resource. AWS returns its
+code once and never again, it is consumed once at node bootstrap, and it expires in
+24 hours — so in Terraform it would be a credential living in state for the life of
+the cluster and a diff on every plan. It is created by
+`002-setup/06-deploy-hybrid-nodes.sh --create-activation` instead.
+
+Pod-level credentials need nothing extra. IRSA exchanges a projected service
+account token at STS with no IMDS involvement, so a workflow pod on a hybrid node
+uses the same service account it would on a cloud node.
+
+Use SSM unless you already run a certificate authority; with an existing PKI, IAM
+Roles Anywhere is the better fit and is the one option that lets you choose the
+node name. Under SSM the node name is generated (`mi-…`), so nothing may key off a
+hostname — select on a node label instead.
+
 ### CNI
 
 The AWS VPC CNI cannot serve hybrid nodes: it assigns pods real VPC addresses by
