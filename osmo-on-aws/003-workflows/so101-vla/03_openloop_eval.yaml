@@ -48,8 +48,18 @@ default-values:
   # to drive the arm with.
   execution_horizon: 16
   # Diffusion denoising steps. Fewer is faster and slightly less accurate; this is the
-  # other half of stage 04's latency budget.
+  # other half of stage 04's latency budget. Raising it does NOT smooth the output —
+  # measured flat from 4 to 32 while latency grew fivefold.
   denoising_steps: 4
+
+  # --- smoothness ------------------------------------------------------------
+  # One trajectory is enough: jitter is a property of the policy, not of the episode.
+  smoothness_traj_id: 0
+  smoothness_steps: 160
+  # Warn above this worst-joint direction-reversal fraction. Teleop recordings sit under
+  # 0.01. A policy above ~0.25 needs stage 04's command deadband, or it will heat a servo
+  # without moving the arm.
+  smoothness_warn_reversals: 0.25
 
   # --- resources -------------------------------------------------------------
   eval_platform: l40s
@@ -91,6 +101,8 @@ workflow:
     files:
     - localpath: files/gr00t/install_n17.sh
       path: /tmp/install_n17.sh
+    - localpath: files/gr00t/measure_smoothness.py
+      path: /tmp/measure_smoothness.py
     command: [bash, -c]
     args:
       - |
@@ -201,6 +213,16 @@ workflow:
           --denoising-steps {{ denoising_steps }} \
           --steps {{ steps }} 2>&1 | tee {{output}}/openloop_eval.log
 
+        # Smoothness, which the error metrics above cannot see. A zero-mean oscillation on
+        # a broadly correct trajectory scores well on MSE and MAE, and on a real arm it is
+        # what makes a joint overheat — so it gets its own number rather than being left to
+        # be discovered by hardware.
+        python -u /tmp/measure_smoothness.py "${DS}" "${CKPT}" \
+          {{ smoothness_traj_id }} {{ smoothness_steps }} {{ denoising_steps }} \
+          2>&1 | tee {{output}}/smoothness.log || echo "SMOOTHNESS_FAILED"
+        grep RESULTS_JSON {{output}}/smoothness.log \
+          | sed 's/^RESULTS_JSON //' > {{output}}/smoothness.json || true
+
         # Copy whatever plots exist instead of letting an unmatched glob fail the task.
         # The numbers are the gate; the plots are how a human reads it.
         cp "${PLOT_DIR}"/*.jpeg {{output}}/plots/ 2>/dev/null || true
@@ -212,7 +234,7 @@ workflow:
         # succeeded: out-of-range trajectory IDs are skipped with a warning and the eval
         # still exits 0, so a typo silently shrinks the sample it averages over.
         METRICS_RC=0
-        python3 - {{output}} "{{ traj_ids }}" "{{ checkpoint_url }}" "${CKPT}" <<'PY' || METRICS_RC=$?
+        python3 - {{output}} "{{ traj_ids }}" "{{ checkpoint_url }}" "${CKPT}" {{ smoothness_warn_reversals }} <<'PY' || METRICS_RC=$?
         import json, pathlib, re, sys
 
         out = pathlib.Path(sys.argv[1])
@@ -247,6 +269,24 @@ workflow:
 
         evaluated = sorted(t for t, v in per_traj.items() if v["mse"] is not None)
         missing = [t for t in requested if t not in evaluated]
+        # Smoothness, if it was produced. Reported beside the error metrics because the two
+        # answer different questions and only one of them is visible in the plots.
+        smoothness = None
+        smooth_path = out / "smoothness.json"
+        if smooth_path.is_file() and smooth_path.stat().st_size:
+            try:
+                raw_smooth = json.loads(smooth_path.read_text())
+                row = next(iter(raw_smooth["sweep"].values()))
+                smoothness = dict(
+                    worst_reversals=row["worst_reversals"],
+                    ground_truth_worst_reversals=max(
+                        v["reversals"] for v in raw_smooth["ground_truth"].values()
+                    ),
+                    per_joint={k: v["reversals"] for k, v in row["joints"].items()},
+                )
+            except (ValueError, KeyError, StopIteration) as exc:
+                print("WARNING: could not read smoothness.json: %r" % exc, file=sys.stderr)
+
         result = dict(
             checkpoint_url=sys.argv[3],
             global_step=global_step,
@@ -257,6 +297,7 @@ workflow:
             average_mse=avg("MSE"),
             average_mae=avg("MAE"),
             plot_count=len(list((out / "plots").glob("*.jpeg"))),
+            smoothness=smoothness,
             complete=not missing and avg("MSE") is not None,
         )
         (out / "metrics.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -270,8 +311,27 @@ workflow:
                   for t in result["per_trajectory"]]
         lines += ["average MSE: %s" % result["average_mse"],
                   "average MAE: %s" % result["average_mae"]]
+        if smoothness:
+            lines.append(
+                "worst-joint direction reversals: %.1f%% (ground truth %.1f%%)"
+                % (smoothness["worst_reversals"] * 100,
+                   smoothness["ground_truth_worst_reversals"] * 100)
+            )
         (out / "metrics.txt").write_text("\n".join(lines) + "\n")
         print("\n".join(lines))
+
+        # Loud, and deliberately not a failure: a jittery policy is still drivable, but only
+        # with stage 04's command deadband. Silence here is what let it reach hardware.
+        if smoothness and smoothness["worst_reversals"] > float(sys.argv[5]):
+            print(
+                "WARNING: this checkpoint's action chunks reverse direction on %.0f%% of "
+                "steps at their worst joint, against %.1f%% for the trajectory it imitates. "
+                "The arm will do servo work without moving. Drive it with stage 04's "
+                "command_deadband_deg set, and watch servo temperature."
+                % (smoothness["worst_reversals"] * 100,
+                   smoothness["ground_truth_worst_reversals"] * 100),
+                file=sys.stderr,
+            )
 
         if not result["complete"]:
             print("INCOMPLETE: requested %s, evaluated %s — trajectory IDs out of range "

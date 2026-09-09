@@ -213,6 +213,7 @@ What the client does, and why each item is there:
 
 | Guard | What it prevents |
 |---|---|
+| A command deadband, and a servo-temperature abort | This policy does not hold still — see **Jitter** below. Without the deadband the arm pays acceleration current every step without moving, and the smallest servo reaches its thermal cutoff, at which it drops the arm |
 | Torque is enabled only after `Goal_Position` is set to the *present* pose | LeRobot's own `connect()` re-enables torque onto whatever goal was last written — so an arm moved by hand since the last run would snap back to it |
 | Every commanded value clamped to the calibrated range, less a margin | The calibrated range is narrower than the servo range, so an out-of-range action would drive into a mechanical hard stop |
 | Per-step cap on how far a joint may be commanded from where it actually is | Bounds a single wild action to a slow move instead of a snap |
@@ -385,6 +386,55 @@ If the arm has been recalibrated since recording, **a fresh calibration is a dif
 the policy will drive in it wrongly. Recalibrating does not fix this; finding the original calibration
 does.
 
+### Jitter: this policy does not hold still, and the error metrics cannot see it
+
+Measured on the fine-tuned checkpoint, against the recordings it was trained on:
+
+| | direction reversals, worst joint | per-step size, p50 |
+|---|---|---|
+| Teleop recordings (ground truth) | **0.6%** | 0.00-0.18 |
+| Policy output | **43-68%** | 0.15-0.58 |
+
+The recordings are smooth and monotonic, and hold four of the six joints *exactly* still
+more than half the time. The policy reverses direction on roughly half of all consecutive
+steps instead. The amplitude is small — a few tenths of a degree — so **the arm does the
+same amount of servo work while oscillating rather than progressing.**
+
+That is not cosmetic. The first long hardware run aborted after two minutes because the
+**gripper reached 60 °C** while every other joint sat at its resting temperature: it is the
+smallest servo with the least thermal mass, and it was being driven continuously through
+dwell periods it should have spent stationary. At 70 °C these servos cut their own torque
+and drop the arm — the one failure mode software cannot intervene in.
+
+Two things this rules out, both measured rather than assumed:
+
+- **Raising `denoising_steps` does not help.** Swept 4 → 8 → 16 → 32: reversals stayed at
+  24-68% throughout while latency grew from 143 ms to 725 ms. Do not spend the budget there.
+  (8 *is* the accuracy optimum — MSE 6.97 → 4.01 — for +83 ms, which is worth having on its
+  own merits.)
+- **It is not the re-planning.** Reversals within a single predicted chunk (57%) match those
+  at chunk boundaries (55%), so the chunk itself is jittery, not the seam between chunks.
+
+The mitigation is `command_deadband_deg` / `command_deadband_gripper`: hold the previous
+command until the target moves more than the threshold, which reproduces the dwell the
+recordings have. Replayed against a real run's commands:
+
+| deadband (arm / gripper) | reversals | arm travel kept | gripper travel kept |
+|---|---|---|---|
+| off | 39-60% | 100% | 100% |
+| 0.3 / 0.5 | 11-21% | 79-96% | 75% |
+| **0.5 / 1.0** (default) | **2-12%** | **74-91%** | 48% |
+| 1.0 / 2.0 | 0-3% | 34-86% | 34% |
+
+A deadband costs nothing for sustained motion — it accumulates past the threshold within a
+step or two, so this is a quantization, not a lag, which is why it is preferred to a
+low-pass filter in a loop that already spends 400 ms per round trip. `held_by_deadband` in
+`results.json` records how often each joint was held.
+
+**Stage 03 now measures this** and warns above `smoothness_warn_reversals`. It does not fail
+the stage, because a jittery policy is still drivable with the deadband — but it is no longer
+something you discover from a hot servo.
+
 ### Reading `results.json`
 
 Beyond the per-episode records:
@@ -400,6 +450,8 @@ Beyond the per-episode records:
 | `loop_overruns`, `worst_loop_overrun_ms` | The loop could not hold `control_hz` |
 | `clipped_by_joint` | How often each joint's command hit the envelope |
 | `mean_shortfall` | Per joint, how far short of its command the arm actually stopped |
+| `held_by_deadband` | Per joint, how many commands the deadband suppressed as dither |
+| `max_temp_c` | Hottest servo reading seen. The abort threshold is `max_servo_temp_c`; their own cutoff is 70 °C |
 
 That last one matters more than it looks. **This arm does not reach what it is told**, and unevenly:
 one joint achieved 86% of its commanded amplitude and another only 48%, and the elbow descends more
@@ -456,11 +508,13 @@ scales a node group up or down for you.
 |---|---|---|
 | 01 prepare | Validated | Both acquisition paths, v2 and v3 inputs, `model=none` and `gr00t-n17` |
 | 02 fine-tune | Validated at 10,000 steps | Loss 1.141 → 0.018 in 5 h 52 m; all five retained checkpoints verified against their manifests |
-| 03 open-loop eval | Validated | Against 10-step, 6,000-step and 10,000-step checkpoints — the metric separates them by two orders of magnitude |
+| 03 open-loop eval | Validated | Against 10-step, 6,000-step and 10,000-step checkpoints — the error metric separates them by two orders of magnitude. **It does not measure smoothness**, which is why that is now reported separately |
 | 04 HIL, `no_motion` rehearsal | Validated on real hardware | Both tasks gang-scheduled, the client resolved the policy task's host and connected, EEPROM matched the recording calibration, unit conversion agreed with LeRobot on all six joints, both cameras opened at the dataset's resolution, and the loop ran 29 replans over 30 s with zero writes to the servo bus |
 | 04 HIL, powered episode | Validated on real hardware | One 15 s episode at capped speed: torque engaged holding the present pose, the policy drove the arm closed-loop for 254 steps over 16 replans at 16.9 Hz, the arm returned to within 1 deg of its start pose on every joint, and torque was released and verified off on all six |
 | 04 HIL, `inference_site=edge` | **Not validated, and cannot be here** | Needs a GPU on the edge machine and a platform this repo does not create |
 | 04 HIL, 30 Hz closed loop | **Not reachable over this WAN** | 15.2 Hz at the default horizon. Not payload-bound and not inference-bound — see the latency section |
+| 04 HIL, sustained multi-episode run | **Not yet achieved** | A 20-episode attempt aborted 2 minutes in on gripper temperature, before the deadband existed. The abort worked as designed and the servo cooled with no damage; the run has not been repeated since |
+| Task success | **Unmeasured** | No episode has been scored. There is no sensor for it — success is the operator's verdict, recorded through the control directory |
 
 A reader with no robot gets the complete pipeline through stage 03. That is deliberate.
 
@@ -486,6 +540,8 @@ image, so the commit it pins is changed in one place. That file is injected by e
 | `osmo workflow status` is not a command | It is `osmo workflow query` | — |
 | Stage 04: the client sits at "still waiting for the policy server" and eventually aborts | The server task is still downloading the checkpoint, still loading the model — or it failed. The group is gang-scheduled, so both start together | Read the **policy-server** task's own logs. `policy_wait_s` in `results.json` records how long it took |
 | Stage 04 server dies with `Could not load this library: libtorchcodec_core*.so` | `install_n17.sh` verifies its toolchain by importing torchcodec, which needs ffmpeg — even though serving a policy decodes no video | `apt-get install ffmpeg` in the task, as every other stage does |
+| A servo gets hot fast while the others stay cool, or stage 04 aborts on temperature | The policy's dither, concentrated in the smallest servo — see **Jitter** | Set `command_deadband_deg` / `command_deadband_gripper`. Do not raise `max_servo_temp_c`; at 70 °C the servo cuts its own torque and drops the arm |
+| Stage 03 warns about direction reversals | The checkpoint's chunks are jittery. MSE and MAE cannot see this | Drive stage 04 with the deadband set. Raising `denoising_steps` does not help — measured flat from 4 to 32 |
 | Stage 04: the arm pauses at every chunk boundary, `loop_overruns` ≈ `replans` | A round trip costs more than one chunk of motion | The latency section above. Shrink the frames first, then raise `action_horizon` |
 | Stage 04 fails with `Server error: <modality> key '...' must be in observation` | The server rejected the observation. `observation_shape` in `results.json` records the exact wire shape the server receives, with each key's *type* — a key arriving as `bytes` rather than `str` reads on the server as a key that is simply absent | Compare `observation_shape` against the server's own `action/state/video keys` log lines. Seen once and not reproduced by an identical resubmission |
 | A stage 04 server-side error appears in the client log as one line with no server traceback | The server prints a traceback and keeps serving, so its stdout is a pipe that stays open and block-buffers | Fixed: the server runs under `python -u`. Anything older needs `PYTHONUNBUFFERED=1` |

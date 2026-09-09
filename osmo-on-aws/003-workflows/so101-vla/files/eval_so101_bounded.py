@@ -232,7 +232,14 @@ class ArmDriver:
     """
 
     def __init__(
-        self, robot, envelope: SafetyEnvelope, *, no_motion: bool, settle_timeout_s: float = 6.0
+        self,
+        robot,
+        envelope: SafetyEnvelope,
+        *,
+        no_motion: bool,
+        settle_timeout_s: float = 6.0,
+        deadband_deg: float = 0.0,
+        deadband_gripper: float = 0.0,
     ):
         self.robot = robot
         self.bus = robot.bus
@@ -243,6 +250,9 @@ class ArmDriver:
         self.final_torque_state: dict[str, int] = {}
         self.settle_timeout_s = settle_timeout_s
         self.return_residual: float | None = None
+        self.deadband_deg = deadband_deg
+        self.deadband_gripper = deadband_gripper
+        self.held = {j: 0 for j in JOINTS}
 
     def verify_units(self) -> dict:
         """Check our normalization against LeRobot's, on the live arm, before torque.
@@ -280,6 +290,9 @@ class ArmDriver:
 
     def torque_state(self) -> dict[str, int]:
         return self.bus.sync_read("Torque_Enable", normalize=False)
+
+    def temperatures(self) -> dict[str, int]:
+        return self.bus.sync_read("Present_Temperature", normalize=False)
 
     def force_torque_off(self, attempts: int = 4) -> dict[str, int]:
         """Drop torque and **verify** it, retrying. Never raises.
@@ -379,8 +392,27 @@ class ArmDriver:
         )
 
     def send(self, pose: dict[str, float]) -> dict[str, float]:
-        """Clamp to the envelope and command. Returns what was actually sent."""
+        """Clamp to the envelope, suppress dither, and command. Returns what was sent.
+
+        The deadband exists because this policy does not hold still. Its predicted chunks
+        reverse direction on 24-68% of consecutive steps where the teleop recordings they
+        imitate reverse on under 1%, and in those recordings four of the six joints are
+        *exactly* stationary more than half the time. The amplitude is small — a few
+        tenths of a degree — so the arm goes nowhere, but it pays acceleration current
+        every step, and the smallest servo reached 60C in two minutes of that.
+
+        Holding the previous command below a threshold reproduces the dwell the recordings
+        have. It costs nothing for sustained motion, which accumulates past the threshold
+        within a step or two, so this is a quantization rather than a lag — unlike a
+        low-pass filter, which would add phase lag to a loop that cannot afford it.
+        """
         clamped = {joint: self.envelope.clamp(joint, pose[joint]) for joint in JOINTS}
+        if self.last_commanded is not None:
+            for joint in JOINTS:
+                band = self.deadband_gripper if joint == GRIPPER else self.deadband_deg
+                if abs(clamped[joint] - self.last_commanded[joint]) < band:
+                    clamped[joint] = self.last_commanded[joint]
+                    self.held[joint] += 1
         self.last_commanded = clamped
         if self.no_motion:
             return clamped
@@ -723,7 +755,10 @@ def run_episode(index, arm, policy, control, rate, args, trace, records) -> None
     interesting part when something went wrong.
     """
     start_pose = arm.present()
-    state = {"outcome": "completed", "success": None, "note": "", "steps": 0, "replans": 0}
+    state = {
+        "outcome": "completed", "success": None, "note": "",
+        "steps": 0, "replans": 0, "max_temp_c": 0,
+    }
     # Commanded-versus-achieved, sampled once per chunk. This arm does not reach what it
     # is told — unevenly, per joint — so the gap is a first-class result, not a detail.
     achieved_gap: dict[str, list[float]] = {j: [] for j in JOINTS}
@@ -748,6 +783,20 @@ def run_episode(index, arm, policy, control, rate, args, trace, records) -> None
             if (time.perf_counter() - episode_start) >= args.episode_timeout_s:
                 state["outcome"] = "timeout"
                 break
+
+            # Once per re-plan, which is cheap next to a round trip. A servo that reaches
+            # its own Max_Temperature_Limit cuts its torque and drops the arm wherever it
+            # is; aborting here trades that for a controlled return while the arm is still
+            # holding. Joints carrying gravity load heat fastest, so this is what bounds a
+            # long unattended session rather than the episode count.
+            temps = arm.temperatures()
+            hottest = max(temps.values())
+            state["max_temp_c"] = max(state["max_temp_c"], hottest)
+            if hottest >= args.max_servo_temp_c:
+                raise Abort(
+                    f"servo temperature {hottest}C reached the {args.max_servo_temp_c}C "
+                    f"ceiling ({temps}); stopping before the servos cut their own torque"
+                )
 
             obs = arm.observe()
             chunk = policy.request(obs, args.lang_instruction)
@@ -807,6 +856,7 @@ def run_episode(index, arm, policy, control, rate, args, trace, records) -> None
                 "steps": state["steps"],
                 "replans": state["replans"],
                 "achieved_hz": round(state["steps"] / duration, 2) if duration > 0 else None,
+                "max_temp_c": state["max_temp_c"],
                 "start_pose": {j: round(v, 3) for j, v in start_pose.items()},
                 "mean_shortfall": {
                     j: round(statistics.fmean(v), 3) for j, v in achieved_gap.items() if v
@@ -920,6 +970,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Dress rehearsal: connect, warm up, run the whole loop and log every action "
         "that would be sent — but never enable torque. The arm stays limp.",
+    )
+    g.add_argument(
+        "--command-deadband-deg",
+        type=float,
+        default=0.5,
+        help="Hold the previous command when an arm joint's target moves less than this. "
+        "Suppresses the policy's dither, which costs servo current without moving the arm. "
+        "0 disables it.",
+    )
+    g.add_argument("--command-deadband-gripper", type=float, default=1.0)
+    g.add_argument(
+        "--max-servo-temp-c",
+        type=int,
+        default=55,
+        help="Abort cleanly if any servo reaches this. The servos' own limit is 70C, at "
+        "which they cut torque and drop the arm; this stops well short of that, with the "
+        "arm still under control.",
     )
     g.add_argument("--release-ramp-s", type=float, default=2.0)
     g.add_argument(
@@ -1065,7 +1132,12 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
             print(f"  {joint:<14} {lo:>8.2f} .. {hi:>8.2f}", flush=True)
 
         arm = ArmDriver(
-            robot, envelope, no_motion=args.no_motion, settle_timeout_s=args.release_settle_s
+            robot,
+            envelope,
+            no_motion=args.no_motion,
+            settle_timeout_s=args.release_settle_s,
+            deadband_deg=args.command_deadband_deg,
+            deadband_gripper=args.command_deadband_gripper,
         )
         results["units_check"] = arm.verify_units()
         print("unit conversion agrees with LeRobot on all six joints", flush=True)
@@ -1226,11 +1298,13 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
             "loop_overruns": rate.overruns,
             "worst_loop_overrun_ms": round(rate.worst_overrun_ms, 1),
             "clipped_by_joint": dict(envelope.clipped) if envelope else {},
+            "held_by_deadband": dict(arm.held) if arm else {},
             "no_motion": args.no_motion,
             # Read back off the servos, not inferred from having asked. This is the field
             # to check first after any run that ended badly.
             "final_torque_state": arm.final_torque_state if arm else {},
             "return_residual": arm.return_residual if arm else None,
+            "max_temp_c": max((e.get("max_temp_c") or 0) for e in records) if records else None,
             "torque_released": bool(arm is None or args.no_motion)
             or (
                 bool(arm.final_torque_state)

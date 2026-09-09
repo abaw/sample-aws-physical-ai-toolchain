@@ -99,6 +99,23 @@ default-values:
   # The ping and warm-up calls run with the arm limp and include the model's
   # first-inference cost, so they get their own, generous, ceiling.
   policy_setup_timeout_s: 300
+  # How long the return-to-start move is interpolated over. Match it to how far the arm
+  # actually has to travel: left short, the goal runs ahead of the arm and the return
+  # happens at whatever `speed` allows rather than as a controlled ramp.
+  # Hold the previous command when a joint's target moves less than this. The policy does
+  # not hold still: its chunks reverse direction on 24-68% of steps where the recordings it
+  # imitates reverse on under 1%, and four of six joints in those recordings are exactly
+  # stationary more than half the time. The amplitude is a few tenths of a degree, so the
+  # arm goes nowhere while paying acceleration current every step — which took the gripper
+  # to 60C in two minutes. Raising denoising_steps does NOT fix this; measured flat from 4
+  # to 32. Set 0 to disable and see the raw policy output.
+  command_deadband_deg: 0.5
+  command_deadband_gripper: 1.0
+  # Abort cleanly if any servo reaches this. Their own limit is 70C, at which they cut
+  # torque and drop the arm; joints carrying gravity load heat fastest, so this is what
+  # bounds a long session rather than the episode count.
+  max_servo_temp_c: 55
+  release_ramp_s: 2
   # Sending the last goal of the return ramp is not reaching it, and `speed` caps how fast
   # the arm can get there. Without this wait torque drops while it is still travelling and
   # the arm is left wherever it got to.
@@ -375,7 +392,11 @@ workflow:
             --max-step-gripper {{ max_step_gripper }} \
             --acceleration {{ acceleration }} \
             --speed {{ speed }} \
+            --command-deadband-deg {{ command_deadband_deg }} \
+            --command-deadband-gripper {{ command_deadband_gripper }} \
+            --max-servo-temp-c {{ max_servo_temp_c }} \
             --release-settle-s {{ release_settle_s }} \
+            --release-ramp-s {{ release_ramp_s }} \
             "${EXTRA[@]}" \
             --action-horizon {{ action_horizon }} \
             --control-hz {{ control_hz }} \
