@@ -213,7 +213,7 @@ What the client does, and why each item is there:
 
 | Guard | What it prevents |
 |---|---|
-| A command deadband, and a servo-temperature abort | This policy does not hold still — see **Jitter** below. Without the deadband the arm pays acceleration current every step without moving, and the smallest servo reaches its thermal cutoff, at which it drops the arm |
+| A command deadband, and a servo-temperature rest | This policy does not hold still — see **Jitter** below. Without the deadband the arm pays acceleration current every step without moving, and the smallest servo reaches its thermal cutoff, at which it drops the arm |
 | Torque is enabled only after `Goal_Position` is set to the *present* pose | LeRobot's own `connect()` re-enables torque onto whatever goal was last written — so an arm moved by hand since the last run would snap back to it |
 | Every commanded value clamped to the calibrated range, less a margin | The calibrated range is narrower than the servo range, so an out-of-range action would drive into a mechanical hard stop |
 | Per-step cap on how far a joint may be commanded from where it actually is | Bounds a single wild action to a slow move instead of a snap |
@@ -435,6 +435,34 @@ low-pass filter in a loop that already spends 400 ms per round trip. `held_by_de
 the stage, because a jittery policy is still drivable with the deadband — but it is no longer
 something you discover from a hot servo.
 
+### Thermal duty cycle: the run rests, it does not stop
+
+These servos cut their own torque at 70 °C and drop the arm, which is the one failure mode
+no software can intervene in. So the client reads `Present_Temperature` once per re-plan and,
+at `max_servo_temp_c`, **rests rather than ending the run**: the arm returns to where the
+episode began, torque comes off, and it waits until every servo is back under
+`resume_servo_temp_c` before re-attempting the episode.
+
+Three details that matter:
+
+- **Torque must come off to cool.** A servo holding a pose against gravity keeps drawing
+  current, so a rest that merely stopped sending actions would not cool anything. The arm is
+  limp for the duration.
+- **A rest re-attempts the episode rather than consuming it**, so `max_episodes` counts real
+  attempts and a hot arm costs wall clock, not coverage. Budget `exec_timeout` accordingly —
+  roughly a minute per rest from 55 °C to 45 °C with torque off.
+- **`resume_servo_temp_c` is well below `max_servo_temp_c` on purpose.** Resuming the moment
+  the ceiling cleared would stop and start every few seconds; the gap is what makes a rest a
+  rest.
+
+`max_cooldowns` bounds it, so an arm that cannot sustain the duty cycle stops instead of
+cycling forever. Measured with the deadband on, three 60 s episodes peaked at 53 °C and
+recovered between episodes rather than accumulating — against 60 °C and climbing in two
+episodes without it.
+
+**Do not raise `max_servo_temp_c` to make a run finish.** The headroom to 70 °C is what turns
+a thermal stop into a controlled return instead of the arm going limp mid-motion.
+
 ### Reading `results.json`
 
 Beyond the per-episode records:
@@ -451,7 +479,9 @@ Beyond the per-episode records:
 | `clipped_by_joint` | How often each joint's command hit the envelope |
 | `mean_shortfall` | Per joint, how far short of its command the arm actually stopped |
 | `held_by_deadband` | Per joint, how many commands the deadband suppressed as dither |
-| `max_temp_c` | Hottest servo reading seen. The abort threshold is `max_servo_temp_c`; their own cutoff is 70 °C |
+| `max_temp_c`, `hottest_temps` | Hottest reading seen, and the per-joint readings at that moment — the maximum alone does not say where the heat is, and on this arm it has been one joint at a time |
+| `rests`, `rested_s` | How often the run stopped to cool, and for how long in total |
+| `attempt` (per episode) | Higher than `episode` where a thermal rest forced a re-attempt |
 
 That last one matters more than it looks. **This arm does not reach what it is told**, and unevenly:
 one joint achieved 86% of its commanded amplitude and another only 48%, and the elbow descends more
@@ -540,7 +570,9 @@ image, so the commit it pins is changed in one place. That file is injected by e
 | `osmo workflow status` is not a command | It is `osmo workflow query` | — |
 | Stage 04: the client sits at "still waiting for the policy server" and eventually aborts | The server task is still downloading the checkpoint, still loading the model — or it failed. The group is gang-scheduled, so both start together | Read the **policy-server** task's own logs. `policy_wait_s` in `results.json` records how long it took |
 | Stage 04 server dies with `Could not load this library: libtorchcodec_core*.so` | `install_n17.sh` verifies its toolchain by importing torchcodec, which needs ffmpeg — even though serving a policy decodes no video | `apt-get install ffmpeg` in the task, as every other stage does |
-| A servo gets hot fast while the others stay cool, or stage 04 aborts on temperature | The policy's dither, concentrated in the smallest servo — see **Jitter** | Set `command_deadband_deg` / `command_deadband_gripper`. Do not raise `max_servo_temp_c`; at 70 °C the servo cuts its own torque and drops the arm |
+| A servo gets hot fast while the others stay cool, or stage 04 keeps resting to cool | The policy's dither, concentrated in the smallest servo — see **Jitter** | Set `command_deadband_deg` / `command_deadband_gripper`. Do not raise `max_servo_temp_c`; at 70 °C the servo cuts its own torque and drops the arm |
+| Stage 04 stops with "reached the N-rest limit" | The arm cannot sustain this duty cycle | Shorten `episode_timeout_s`, widen the deadband, or lower `speed`. Raising `max_cooldowns` only makes it cycle longer |
+| Stage 04 stops with "servos did not cool within" | Something is still drawing current with torque off | Check the arm is not resting against a hard stop or holding an object under load |
 | Stage 03 warns about direction reversals | The checkpoint's chunks are jittery. MSE and MAE cannot see this | Drive stage 04 with the deadband set. Raising `denoising_steps` does not help — measured flat from 4 to 32 |
 | Stage 04: the arm pauses at every chunk boundary, `loop_overruns` ≈ `replans` | A round trip costs more than one chunk of motion | The latency section above. Shrink the frames first, then raise `action_horizon` |
 | Stage 04 fails with `Server error: <modality> key '...' must be in observation` | The server rejected the observation. `observation_shape` in `results.json` records the exact wire shape the server receives, with each key's *type* — a key arriving as `bytes` rather than `str` reads on the server as a key that is simply absent | Compare `observation_shape` against the server's own `action/state/video keys` log lines. Seen once and not reproduced by an identical resubmission |

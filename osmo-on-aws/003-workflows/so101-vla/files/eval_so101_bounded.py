@@ -67,6 +67,15 @@ class Abort(Exception):
     """Raised to unwind through the release path rather than dying where we stand."""
 
 
+class Cooldown(Exception):
+    """Raised to end an episode early so the servos can rest, without ending the run.
+
+    Distinct from ``Abort`` because it is not a fault: it unwinds the same way, returning
+    the arm and dropping torque, but the caller then waits for the servos to cool and
+    re-attempts the episode instead of giving up.
+    """
+
+
 _stop = threading.Event()
 
 
@@ -293,6 +302,42 @@ class ArmDriver:
 
     def temperatures(self) -> dict[str, int]:
         return self.bus.sync_read("Present_Temperature", normalize=False)
+
+    def wait_to_cool(self, resume_c: int, timeout_s: float, poll_s: float = 5.0) -> dict:
+        """Rest until every servo is back under `resume_c`. Torque must already be off.
+
+        Cooling only happens with torque released — a servo holding a pose against gravity
+        keeps drawing current — so the caller returns the arm and drops torque first, and
+        the arm is limp for the duration of this wait.
+
+        `resume_c` is deliberately well below the pause threshold. Resuming the moment the
+        ceiling is cleared would stop and start every few seconds; the gap is the
+        hysteresis that makes a rest an actual rest.
+        """
+        start = time.perf_counter()
+        temps = self.temperatures()
+        peak = dict(temps)
+        print(
+            f"resting until every servo is under {resume_c}C (now "
+            f"{max(temps.values())}C, torque off)",
+            flush=True,
+        )
+        while max(temps.values()) >= resume_c:
+            if _stop.is_set():
+                raise Abort("stop requested while resting")
+            waited = time.perf_counter() - start
+            if waited >= timeout_s:
+                raise Abort(
+                    f"servos did not cool below {resume_c}C within {timeout_s:.0f}s "
+                    f"(still {temps}); something is holding current or the arm is stalled"
+                )
+            time.sleep(poll_s)
+            temps = self.temperatures()
+            if int(waited) % 30 < poll_s:
+                print(f"  resting, {waited:.0f}s elapsed, hottest {max(temps.values())}C", flush=True)
+        rested = time.perf_counter() - start
+        print(f"cooled to {max(temps.values())}C after {rested:.0f}s; resuming", flush=True)
+        return {"rested_s": round(rested, 1), "peak": peak, "resumed_at": temps}
 
     def force_torque_off(self, attempts: int = 4) -> dict[str, int]:
         """Drop torque and **verify** it, retrying. Never raises.
@@ -747,7 +792,7 @@ class ControlDir:
 # ---------------------------------------------------------------------------
 
 
-def run_episode(index, arm, policy, control, rate, args, trace, records) -> None:
+def run_episode(index, attempt, arm, policy, control, rate, args, trace, records) -> None:
     """Run one episode, append its record, and never leave the arm moving.
 
     The record is appended in a ``finally`` rather than returned, so an abort halfway
@@ -757,7 +802,7 @@ def run_episode(index, arm, policy, control, rate, args, trace, records) -> None
     start_pose = arm.present()
     state = {
         "outcome": "completed", "success": None, "note": "",
-        "steps": 0, "replans": 0, "max_temp_c": 0,
+        "steps": 0, "replans": 0, "max_temp_c": 0, "hottest_temps": {},
     }
     # Commanded-versus-achieved, sampled once per chunk. This arm does not reach what it
     # is told — unevenly, per joint — so the gap is a first-class result, not a detail.
@@ -791,11 +836,15 @@ def run_episode(index, arm, policy, control, rate, args, trace, records) -> None
             # long unattended session rather than the episode count.
             temps = arm.temperatures()
             hottest = max(temps.values())
-            state["max_temp_c"] = max(state["max_temp_c"], hottest)
+            if hottest > state["max_temp_c"]:
+                state["max_temp_c"] = hottest
+                # Which joint, not just how hot. The maximum alone does not say where the
+                # heat is, and on this arm it has been one joint at a time.
+                state["hottest_temps"] = dict(temps)
             if hottest >= args.max_servo_temp_c:
-                raise Abort(
+                raise Cooldown(
                     f"servo temperature {hottest}C reached the {args.max_servo_temp_c}C "
-                    f"ceiling ({temps}); stopping before the servos cut their own torque"
+                    f"ceiling ({temps}); resting before the servos cut their own torque"
                 )
 
             obs = arm.observe()
@@ -840,6 +889,10 @@ def run_episode(index, arm, policy, control, rate, args, trace, records) -> None
                     achieved_gap[joint].append(reached[joint] - last_sent[joint])
             if state["outcome"] == "timeout":
                 break
+    except Cooldown as exc:
+        state["outcome"] = "cooldown"
+        state["note"] = str(exc)
+        raise
     except Abort as exc:
         state["outcome"] = "aborted"
         state["note"] = str(exc)
@@ -849,6 +902,7 @@ def run_episode(index, arm, policy, control, rate, args, trace, records) -> None
         records.append(
             {
                 "episode": index,
+                "attempt": attempt,
                 "outcome": state["outcome"],
                 "success": state["success"],
                 "note": state["note"],
@@ -857,6 +911,7 @@ def run_episode(index, arm, policy, control, rate, args, trace, records) -> None
                 "replans": state["replans"],
                 "achieved_hz": round(state["steps"] / duration, 2) if duration > 0 else None,
                 "max_temp_c": state["max_temp_c"],
+                "hottest_temps": state["hottest_temps"],
                 "start_pose": {j: round(v, 3) for j, v in start_pose.items()},
                 "mean_shortfall": {
                     j: round(statistics.fmean(v), 3) for j, v in achieved_gap.items() if v
@@ -984,9 +1039,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-servo-temp-c",
         type=int,
         default=55,
-        help="Abort cleanly if any servo reaches this. The servos' own limit is 70C, at "
+        help="Pause and rest if any servo reaches this. The servos' own limit is 70C, at "
         "which they cut torque and drop the arm; this stops well short of that, with the "
         "arm still under control.",
+    )
+    g.add_argument(
+        "--resume-servo-temp-c",
+        type=int,
+        default=45,
+        help="Resume once every servo is back under this. Deliberately below the pause "
+        "threshold: without the gap the run would stop and start every few seconds.",
+    )
+    g.add_argument(
+        "--cooldown-timeout-s",
+        type=float,
+        default=600.0,
+        help="Give up if the servos will not cool within this. Failing to cool with torque "
+        "off means something is still drawing current.",
+    )
+    g.add_argument(
+        "--max-cooldowns",
+        type=int,
+        default=20,
+        help="Stop after this many rests rather than cycling indefinitely on an arm that "
+        "cannot sustain the duty cycle.",
     )
     g.add_argument("--release-ramp-s", type=float, default=2.0)
     g.add_argument(
@@ -1258,15 +1334,41 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
         policy.open_for_loop()
         print(f"switching to the control-loop timeout of {args.policy_timeout_ms} ms", flush=True)
 
+        # A thermal stop rests and re-attempts the same episode rather than ending the run.
+        # The episode index only advances when an episode finishes for a reason of its own,
+        # so `max_episodes` counts real attempts and a hot arm costs time, not coverage.
+        rests: list[dict] = []
+        results["rests"] = rests
         with (output / "trace.jsonl").open("w") as trace:
-            for index in range(1, args.max_episodes + 1):
+            index, attempt = 1, 0
+            while index <= args.max_episodes:
+                attempt += 1
                 arm.engage(args.acceleration, args.speed)
-                run_episode(index, arm, policy, control, rate, args, trace, records)
+                try:
+                    run_episode(
+                        index, attempt, arm, policy, control, rate, args, trace, records
+                    )
+                except Cooldown as exc:
+                    # run_episode's own teardown has already returned the arm and dropped
+                    # torque, which is the precondition for cooling at all.
+                    print(f"episode {index}: {exc}", flush=True)
+                    if len(rests) >= args.max_cooldowns:
+                        raise Abort(
+                            f"reached the {args.max_cooldowns}-rest limit; the arm cannot "
+                            f"sustain this duty cycle, so stopping rather than cycling"
+                        ) from exc
+                    rests.append(
+                        arm.wait_to_cool(args.resume_servo_temp_c, args.cooldown_timeout_s)
+                        | {"episode": index, "attempt": attempt}
+                    )
+                    continue
                 print(
                     f"episode {index}: {records[-1]['outcome']} "
-                    f"({records[-1]['steps']} steps at {records[-1]['achieved_hz']} Hz)",
+                    f"({records[-1]['steps']} steps at {records[-1]['achieved_hz']} Hz, "
+                    f"hottest {records[-1]['max_temp_c']}C)",
                     flush=True,
                 )
+                index += 1
 
     except Abort as exc:
         results["aborted"] = str(exc)
@@ -1305,6 +1407,8 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
             "final_torque_state": arm.final_torque_state if arm else {},
             "return_residual": arm.return_residual if arm else None,
             "max_temp_c": max((e.get("max_temp_c") or 0) for e in records) if records else None,
+            "rests": len(results.get("rests") or []),
+            "rested_s": round(sum(r["rested_s"] for r in (results.get("rests") or [])), 1),
             "torque_released": bool(arm is None or args.no_motion)
             or (
                 bool(arm.final_torque_state)

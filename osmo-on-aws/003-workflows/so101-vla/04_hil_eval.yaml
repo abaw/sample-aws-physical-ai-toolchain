@@ -111,10 +111,23 @@ default-values:
   # to 32. Set 0 to disable and see the raw policy output.
   command_deadband_deg: 0.5
   command_deadband_gripper: 1.0
-  # Abort cleanly if any servo reaches this. Their own limit is 70C, at which they cut
-  # torque and drop the arm; joints carrying gravity load heat fastest, so this is what
-  # bounds a long session rather than the episode count.
+  # Thermal duty cycle. Their own limit is 70C, at which a servo cuts torque and drops the
+  # arm, so the run pauses well short of it: the arm returns to where the episode began,
+  # torque comes off, and it rests until every servo is back under resume_servo_temp_c.
+  # Torque must be off to cool at all — a servo holding a pose against gravity keeps
+  # drawing current — which is why resting means releasing rather than just pausing.
+  #
+  # A rest re-attempts the same episode rather than consuming it, so max_episodes counts
+  # real attempts and a hot arm costs wall clock instead of coverage. Budget exec_timeout
+  # for that: each rest has been about a minute from 55C to 45C with torque off.
   max_servo_temp_c: 55
+  # Well below the pause threshold. Without the gap the run would stop and start every few
+  # seconds instead of actually resting.
+  resume_servo_temp_c: 45
+  # Failing to cool with torque off means something is still drawing current.
+  cooldown_timeout_s: 600
+  # Stop rather than cycle forever on an arm that cannot sustain the duty cycle.
+  max_cooldowns: 20
   release_ramp_s: 2
   # Sending the last goal of the return ramp is not reaching it, and `speed` caps how fast
   # the arm can get there. Without this wait torque drops while it is still travelling and
@@ -395,6 +408,9 @@ workflow:
             --command-deadband-deg {{ command_deadband_deg }} \
             --command-deadband-gripper {{ command_deadband_gripper }} \
             --max-servo-temp-c {{ max_servo_temp_c }} \
+            --resume-servo-temp-c {{ resume_servo_temp_c }} \
+            --cooldown-timeout-s {{ cooldown_timeout_s }} \
+            --max-cooldowns {{ max_cooldowns }} \
             --release-settle-s {{ release_settle_s }} \
             --release-ramp-s {{ release_ramp_s }} \
             "${EXTRA[@]}" \
