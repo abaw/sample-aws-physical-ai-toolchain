@@ -262,6 +262,8 @@ class ArmDriver:
         self.deadband_deg = deadband_deg
         self.deadband_gripper = deadband_gripper
         self.held = {j: 0 for j in JOINTS}
+        self.bad_temp_reads = 0
+        self.hot_streak = 0
 
     def verify_units(self) -> dict:
         """Check our normalization against LeRobot's, on the live arm, before torque.
@@ -300,8 +302,31 @@ class ArmDriver:
     def torque_state(self) -> dict[str, int]:
         return self.bus.sync_read("Torque_Enable", normalize=False)
 
+    # A servo that genuinely reached this would already have cut its own torque at 70 C, so
+    # a reading above it is a corrupted packet rather than a hot motor. The bus drops or
+    # mangles one occasionally, and a single byte read wrong is indistinguishable from a
+    # real value except by being impossible.
+    IMPLAUSIBLE_TEMP_C = 90
+
     def temperatures(self) -> dict[str, int]:
-        return self.bus.sync_read("Present_Temperature", normalize=False)
+        """Servo temperatures, with implausible readings dropped rather than believed.
+
+        Returns only the joints that answered plausibly. Trusting a single read here cost
+        three spurious rests in one run — the readings were 150 C and 103 C, and the
+        re-read immediately afterwards was normal.
+        """
+        raw = self.bus.sync_read("Present_Temperature", normalize=False)
+        clean = {j: t for j, t in raw.items() if t is not None and 0 < t < self.IMPLAUSIBLE_TEMP_C}
+        dropped = {j: t for j, t in raw.items() if j not in clean}
+        if dropped:
+            self.bad_temp_reads += len(dropped)
+            print(
+                f"WARNING: discarding implausible temperature reading(s) {dropped} as bus "
+                f"corruption; a servo that hot would already have cut its own torque",
+                file=sys.stderr,
+                flush=True,
+            )
+        return clean
 
     def wait_to_cool(self, resume_c: int, timeout_s: float, poll_s: float = 5.0) -> dict:
         """Rest until every servo is back under `resume_c`. Torque must already be off.
@@ -314,15 +339,22 @@ class ArmDriver:
         ceiling is cleared would stop and start every few seconds; the gap is the
         hysteresis that makes a rest an actual rest.
         """
+        def hottest_now() -> int:
+            # An empty reading means every joint's value was rejected as corruption. Treat
+            # that as "still hot" rather than "cool": resuming on a bus that cannot be read
+            # would mean resuming with no thermal protection at all.
+            reading = self.temperatures()
+            return max(reading.values()) if reading else self.IMPLAUSIBLE_TEMP_C
+
         start = time.perf_counter()
         temps = self.temperatures()
         peak = dict(temps)
         print(
             f"resting until every servo is under {resume_c}C (now "
-            f"{max(temps.values())}C, torque off)",
+            f"{max(temps.values()) if temps else 'unreadable'}C, torque off)",
             flush=True,
         )
-        while max(temps.values()) >= resume_c:
+        while (max(temps.values()) if temps else self.IMPLAUSIBLE_TEMP_C) >= resume_c:
             if _stop.is_set():
                 raise Abort("stop requested while resting")
             waited = time.perf_counter() - start
@@ -334,9 +366,10 @@ class ArmDriver:
             time.sleep(poll_s)
             temps = self.temperatures()
             if int(waited) % 30 < poll_s:
-                print(f"  resting, {waited:.0f}s elapsed, hottest {max(temps.values())}C", flush=True)
+                print(f"  resting, {waited:.0f}s elapsed, hottest {hottest_now()}C", flush=True)
         rested = time.perf_counter() - start
         print(f"cooled to {max(temps.values())}C after {rested:.0f}s; resuming", flush=True)
+        self.hot_streak = 0
         return {"rested_s": round(rested, 1), "peak": peak, "resumed_at": temps}
 
     def force_torque_off(self, attempts: int = 4) -> dict[str, int]:
@@ -835,17 +868,36 @@ def run_episode(index, attempt, arm, policy, control, rate, args, trace, records
             # holding. Joints carrying gravity load heat fastest, so this is what bounds a
             # long unattended session rather than the episode count.
             temps = arm.temperatures()
-            hottest = max(temps.values())
-            if hottest > state["max_temp_c"]:
-                state["max_temp_c"] = hottest
-                # Which joint, not just how hot. The maximum alone does not say where the
-                # heat is, and on this arm it has been one joint at a time.
-                state["hottest_temps"] = dict(temps)
-            if hottest >= args.max_servo_temp_c:
-                raise Cooldown(
-                    f"servo temperature {hottest}C reached the {args.max_servo_temp_c}C "
-                    f"ceiling ({temps}); resting before the servos cut their own torque"
-                )
+            if not temps:
+                # Every joint's reading was rejected: the bus is unhealthy, not the arm hot.
+                arm.hot_streak = 0
+            else:
+                hottest = max(temps.values())
+                if hottest > state["max_temp_c"]:
+                    state["max_temp_c"] = hottest
+                    # Which joint, not just how hot. The maximum alone does not say where
+                    # the heat is, and on this arm it has been one joint at a time.
+                    state["hottest_temps"] = dict(temps)
+                # Confirmed over consecutive reads, because one bad packet is not a hot
+                # servo. Real heating persists across reads; corruption does not, and
+                # believing a single read cost three rests in one run for nothing.
+                if hottest >= args.max_servo_temp_c:
+                    arm.hot_streak += 1
+                    if arm.hot_streak >= args.temp_confirm_reads:
+                        raise Cooldown(
+                            f"servo temperature {hottest}C reached the "
+                            f"{args.max_servo_temp_c}C ceiling on "
+                            f"{arm.hot_streak} consecutive reads ({temps}); resting before "
+                            f"the servos cut their own torque"
+                        )
+                    print(
+                        f"NOTE: {hottest}C seen at or above the {args.max_servo_temp_c}C "
+                        f"ceiling ({arm.hot_streak}/{args.temp_confirm_reads} reads); "
+                        f"confirming before resting",
+                        flush=True,
+                    )
+                else:
+                    arm.hot_streak = 0
 
             obs = arm.observe()
             chunk = policy.request(obs, args.lang_instruction)
@@ -1042,6 +1094,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pause and rest if any servo reaches this. The servos' own limit is 70C, at "
         "which they cut torque and drop the arm; this stops well short of that, with the "
         "arm still under control.",
+    )
+    g.add_argument(
+        "--temp-confirm-reads",
+        type=int,
+        default=3,
+        help="Consecutive over-ceiling readings needed before resting. One corrupted read "
+        "is not a hot servo; real heating persists across reads.",
     )
     g.add_argument(
         "--resume-servo-temp-c",
@@ -1408,6 +1467,7 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
             "return_residual": arm.return_residual if arm else None,
             "max_temp_c": max((e.get("max_temp_c") or 0) for e in records) if records else None,
             "rests": len(results.get("rests") or []),
+            "bad_temp_reads": arm.bad_temp_reads if arm else 0,
             "rested_s": round(sum(r["rested_s"] for r in (results.get("rests") or [])), 1),
             "torque_released": bool(arm is None or args.no_motion)
             or (

@@ -121,6 +121,12 @@ default-values:
   # real attempts and a hot arm costs wall clock instead of coverage. Budget exec_timeout
   # for that: each rest has been about a minute from 55C to 45C with torque off.
   max_servo_temp_c: 55
+  # Consecutive over-ceiling readings needed before resting. One corrupted read is not a
+  # hot servo: the bus mangles a packet occasionally, and a single byte read wrong is
+  # indistinguishable from a real value except by being impossible. Readings above 90C are
+  # discarded outright for the same reason — a servo that hot would already have cut its
+  # own torque at 70C.
+  temp_confirm_reads: 3
   # Well below the pause threshold. Without the gap the run would stop and start every few
   # seconds instead of actually resting.
   resume_servo_temp_c: 45
@@ -408,6 +414,7 @@ workflow:
             --command-deadband-deg {{ command_deadband_deg }} \
             --command-deadband-gripper {{ command_deadband_gripper }} \
             --max-servo-temp-c {{ max_servo_temp_c }} \
+            --temp-confirm-reads {{ temp_confirm_reads }} \
             --resume-servo-temp-c {{ resume_servo_temp_c }} \
             --cooldown-timeout-s {{ cooldown_timeout_s }} \
             --max-cooldowns {{ max_cooldowns }} \
