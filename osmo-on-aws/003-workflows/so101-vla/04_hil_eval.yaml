@@ -252,7 +252,11 @@ workflow:
           fi
 
           cd "${GROOT_DIR}"
-          exec python /tmp/serve_policy.py \
+          # -u because the server's own error handler prints a traceback and then keeps
+          # serving, so its stdout is a pipe that stays open: block buffering means the
+          # traceback for a rejected request never reaches the task log, and the only
+          # visible symptom is the client's one-line copy of the message.
+          exec python -u /tmp/serve_policy.py \
             --model-path "${CKPT}" \
             --embodiment-tag new_embodiment \
             --host 0.0.0.0 \

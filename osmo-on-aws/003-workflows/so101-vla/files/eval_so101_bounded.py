@@ -618,6 +618,29 @@ class PolicyLink:
         }
         return len(MsgSerializer.to_bytes(request))
 
+    def describe_observation(self, obs: dict, instruction: str) -> dict:
+        """What the server will see, after the same msgpack round trip it performs.
+
+        Encoded and decoded rather than introspected directly, because the interesting
+        failures are ones where the wire format loses something — a key decoded as bytes
+        instead of str, say, which reads on the server as a key that is simply absent.
+        """
+        from gr00t.policy.server_client import MsgSerializer
+
+        built = self.build_observation(obs, instruction)
+        decoded = MsgSerializer.from_bytes(MsgSerializer.to_bytes(built))
+
+        def describe(value):
+            if isinstance(value, dict):
+                return {f"{type(k).__name__}:{k!r}": describe(v) for k, v in value.items()}
+            if isinstance(value, np.ndarray):
+                return f"ndarray{value.shape} {value.dtype}"
+            if isinstance(value, list):
+                return [describe(v) for v in value[:1]] + (["..."] if len(value) > 1 else [])
+            return f"{type(value).__name__}:{value!r}"[:60]
+
+        return describe(decoded)
+
     def request(self, obs: dict, instruction: str) -> list[dict[str, float]]:
         """One planning request. Returns the chunk as a list of per-step poses."""
         model_obs = self.build_observation(obs, instruction)
@@ -1097,6 +1120,12 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
             f"({args.camera_width}x{args.camera_height} raw uint8 x2)",
             flush=True,
         )
+        # The shape actually going on the wire, as the server will see it after a msgpack
+        # round trip. A server-side "must be in observation" rejection names a key without
+        # saying what it did receive, so record that here instead of inferring it.
+        results["observation_shape"] = policy.describe_observation(obs, args.lang_instruction)
+        print(f"observation as the server receives it: "
+              f"{json.dumps(results['observation_shape'])}", flush=True)
         warmup_ms, chunk = [], None
         for i in range(max(1, args.warmup_requests)):
             start = time.perf_counter()
