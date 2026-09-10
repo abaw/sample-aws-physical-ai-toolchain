@@ -264,6 +264,8 @@ class ArmDriver:
         self.held = {j: 0 for j in JOINTS}
         self.bad_temp_reads = 0
         self.hot_streak = 0
+        self.last_temp: dict[str, int] = {}
+        self.temp_log: list[dict] = []
 
     def verify_units(self) -> dict:
         """Check our normalization against LeRobot's, on the live arm, before torque.
@@ -308,24 +310,49 @@ class ArmDriver:
     # real value except by being impossible.
     IMPLAUSIBLE_TEMP_C = 90
 
-    def temperatures(self) -> dict[str, int]:
-        """Servo temperatures, with implausible readings dropped rather than believed.
+    # Degrees a servo may plausibly change between consecutive reads, which are about a
+    # second apart. Thermal mass makes a larger jump impossible; a wrong byte makes it easy.
+    MAX_TEMP_SLEW_C = 6
 
-        Returns only the joints that answered plausibly. Trusting a single read here cost
-        three spurious rests in one run — the readings were 150 C and 103 C, and the
-        re-read immediately afterwards was normal.
+    def temperatures(self) -> dict[str, int]:
+        """Servo temperatures, with physically impossible readings dropped.
+
+        Two filters, because the obvious one is not the useful one. An absolute ceiling
+        catches a reading of 150 C, but every *ambiguous* reading this arm has produced sat
+        between 38 and 61 C, which sails straight through it.
+
+        The discriminating filter is **slew rate**: a servo has thermal mass and cannot move
+        20 C between reads a second apart, but a corrupted byte can. So a reading is rejected
+        when it implies an impossible rate of change from the last accepted one for that
+        joint. That catches corruption inside the plausible band, which is where it matters —
+        a spurious 55 C is what triggers a rest, not a spurious 150 C.
+
+        Every reading is also recorded, so a run answers the question "was it ever really
+        hot" from its own trace instead of from a maximum that one bad read can inflate.
         """
         raw = self.bus.sync_read("Present_Temperature", normalize=False)
-        clean = {j: t for j, t in raw.items() if t is not None and 0 < t < self.IMPLAUSIBLE_TEMP_C}
-        dropped = {j: t for j, t in raw.items() if j not in clean}
+        clean, dropped = {}, {}
+        for joint, value in raw.items():
+            if value is None or not 0 < value < self.IMPLAUSIBLE_TEMP_C:
+                dropped[joint] = value
+                continue
+            previous = self.last_temp.get(joint)
+            if previous is not None and abs(value - previous) > self.MAX_TEMP_SLEW_C:
+                dropped[joint] = value
+                continue
+            clean[joint] = value
+            self.last_temp[joint] = value
         if dropped:
             self.bad_temp_reads += len(dropped)
             print(
-                f"WARNING: discarding implausible temperature reading(s) {dropped} as bus "
-                f"corruption; a servo that hot would already have cut its own torque",
+                f"WARNING: rejecting temperature reading(s) {dropped} as bus corruption "
+                f"(last accepted {({j: self.last_temp.get(j) for j in dropped})}); a servo "
+                f"cannot change that fast, and one this hot would have cut its own torque",
                 file=sys.stderr,
                 flush=True,
             )
+        if clean:
+            self.temp_log.append({"t": round(time.time(), 2), **clean})
         return clean
 
     def wait_to_cool(self, resume_c: int, timeout_s: float, poll_s: float = 5.0) -> dict:
@@ -1468,6 +1495,10 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
             "max_temp_c": max((e.get("max_temp_c") or 0) for e in records) if records else None,
             "rests": len(results.get("rests") or []),
             "bad_temp_reads": arm.bad_temp_reads if arm else 0,
+            "temp_peak_accepted": (
+                max((max(v for k, v in r.items() if k != "t") for r in arm.temp_log), default=None)
+                if arm and arm.temp_log else None
+            ),
             "rested_s": round(sum(r["rested_s"] for r in (results.get("rests") or [])), 1),
             "torque_released": bool(arm is None or args.no_motion)
             or (
@@ -1475,6 +1506,13 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
                 and all(v == 0 for v in arm.final_torque_state.values())
             ),
         }
+        # The whole temperature series, not just a maximum. A maximum over hundreds of
+        # reads is inflated by any single bad one, which is precisely how an unconfirmed
+        # thermal problem came to be treated as established.
+        if arm is not None and arm.temp_log:
+            with (output / "temperatures.jsonl").open("w") as handle:
+                for row in arm.temp_log:
+                    handle.write(json.dumps(row) + "\n")
         (output / "results.json").write_text(json.dumps(results, indent=2, default=str) + "\n")
         print("\n" + json.dumps(results["summary"], indent=2), flush=True)
 

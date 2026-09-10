@@ -496,6 +496,38 @@ causal low-pass here. Untested; the chunk boundaries would need care.
 the stage, because a jittery policy is still drivable with the deadband — but it is no longer
 something you discover from a hot servo.
 
+### Has overheating actually been observed? Not confirmed — read this before trusting it
+
+Stated plainly, because the machinery below was built on it and the evidence is weaker than
+it looked. **No elevated servo temperature has ever been confirmed by direct measurement.**
+
+| measurement | result |
+|---|---|
+| direct reads over SSH, before and after runs | 24-37 °C, i.e. ambient |
+| 900 checksum-validated reads at rest | 24-30 °C, zero corruption, zero timeouts |
+| readings from inside the control loop | 38-61 °C, plus clear artifacts at 99, 103 and 150 |
+
+Every elevated value came from inside the loop, on a bus that is known to corrupt under load
+— a torque write once failed mid-sequence with no status packet — and `max_temp_c` is a
+maximum over hundreds of reads, which is exactly the statistic one bad read inflates.
+
+Two further reasons to doubt it. **The hot joint is the wrong joint**: one run reported
+`shoulder_pan` at 46 °C while lift and elbow sat at 32, but pan rotates about a vertical axis
+and carries almost no gravity load, so if work caused heating those two should lead, not
+trail by 14 °C. And an absolute ceiling **cannot catch the readings that matter** — it rejects
+150 °C, while every ambiguous reading sits in the 38-61 band and passes.
+
+So the filter is now a **slew rate**: a servo has thermal mass and cannot move more than a
+few degrees between reads a second apart, whereas a corrupted byte can move it anywhere.
+That rejects corruption inside the plausible band, which is where it changes behaviour. Each
+run also publishes `temperatures.jsonl`, the full series, so the question is answerable from
+its own artifacts rather than from a maximum.
+
+**What this means for the deadband:** its thermal justification is unproven. It is still
+worth keeping — it demonstrably reduced per-motor work, taking moving steps from 100% to 72%
+— but "the gripper reached 60 °C" should be read as *possibly* a bad read until a run with the
+slew filter and the full series says otherwise.
+
 ### Thermal duty cycle: the run rests, it does not stop
 
 These servos cut their own torque at 70 °C and drop the arm, which is the one failure mode
