@@ -499,17 +499,23 @@ class ArmDriver:
     def send(self, pose: dict[str, float]) -> dict[str, float]:
         """Clamp to the envelope, suppress dither, and command. Returns what was sent.
 
-        The deadband exists because this policy does not hold still. Its predicted chunks
-        reverse direction on 24-68% of consecutive steps where the teleop recordings they
-        imitate reverse on under 1%, and in those recordings four of the six joints are
-        *exactly* stationary more than half the time. The amplitude is small — a few
-        tenths of a degree — so the arm goes nowhere, but it pays acceleration current
-        every step, and the smallest servo reached 60C in two minutes of that.
+        The deadband holds the previous command below a threshold, which reproduces the dwell
+        the recordings have: this policy does not hold still, reversing direction on 24-68% of
+        consecutive steps where the recordings reverse on under 1%.
 
-        Holding the previous command below a threshold reproduces the dwell the recordings
-        have. It costs nothing for sustained motion, which accumulates past the threshold
-        within a step or two, so this is a quantization rather than a lag — unlike a
-        low-pass filter, which would add phase lag to a loop that cannot afford it.
+        **It is off by default, and the reason is a retraction.** It was added to stop the
+        gripper overheating, on a reading of 60 C after two minutes. Direct measurement later
+        showed that is impossible: dithering the gripper harder than the policy ever did, for
+        four minutes, moves it one degree. Real heating is about a quarter of a degree per
+        minute, so 60 C would take hours. Every elevated reading was bus corruption.
+
+        It also does not smooth the path — measured in end-effector space it changes nothing
+        (49% of steps reverse before, 50% after), because each joint crosses its threshold at
+        a different moment and the combination is a staircase.
+
+        What it does do is reduce per-motor work, taking moving steps from 100% to 72%. That
+        is real but was solving a non-problem, and it costs up to half the gripper's commanded
+        travel, so it should be switched on for a measured reason rather than by default.
         """
         clamped = {joint: self.envelope.clamp(joint, pose[joint]) for joint in JOINTS}
         if self.last_commanded is not None:
@@ -1108,12 +1114,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument(
         "--command-deadband-deg",
         type=float,
-        default=0.5,
+        default=0.0,
         help="Hold the previous command when an arm joint's target moves less than this. "
-        "Suppresses the policy's dither, which costs servo current without moving the arm. "
-        "0 disables it.",
+        "OFF by default: it was added to cut servo heating, and direct measurement showed "
+        "the heating was never real. It also does not smooth the path. Available because it "
+        "genuinely reduces per-motor work, but it discards commanded travel, so enable it "
+        "only for a reason you have measured.",
     )
-    g.add_argument("--command-deadband-gripper", type=float, default=1.0)
+    g.add_argument("--command-deadband-gripper", type=float, default=0.0)
     g.add_argument(
         "--max-servo-temp-c",
         type=int,

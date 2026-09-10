@@ -496,37 +496,37 @@ causal low-pass here. Untested; the chunk boundaries would need care.
 the stage, because a jittery policy is still drivable with the deadband — but it is no longer
 something you discover from a hot servo.
 
-### Has overheating actually been observed? Not confirmed — read this before trusting it
+### Overheating was never real. Retracted, by direct measurement
 
-Stated plainly, because the machinery below was built on it and the evidence is weaker than
-it looked. **No elevated servo temperature has ever been confirmed by direct measurement.**
+A run once aborted on a gripper reading **60 °C after two minutes**, and a deadband, a
+cooldown and a rest-and-retry loop were all built on it. It was bus corruption. Driving the
+gripper deliberately, with load registers confirming the motor was working throughout:
 
-| measurement | result |
-|---|---|
-| direct reads over SSH, before and after runs | 24-37 °C, i.e. ambient |
-| 900 checksum-validated reads at rest | 24-30 °C, zero corruption, zero timeouts |
-| readings from inside the control loop | 38-61 °C, plus clear artifacts at 99, 103 and 150 |
+| condition | duration | goal writes | temperature |
+|---|---|---|---|
+| ±10 tick dither at 30 Hz — *harsher* than the policy's ±5 | 2 min | 2,590 | 32 → 32 °C |
+| ±200 tick open/close — real mechanical work | 4 min | 5,181 | 33 → 34 °C |
 
-Every elevated value came from inside the loop, on a bus that is known to corrupt under load
-— a torque write once failed mid-sequence with no status packet — and `max_temp_c` is a
-maximum over hundreds of reads, which is exactly the statistic one bad read inflates.
+**Real heating is about 0.25 °C per minute**, so 60 °C from ambient would take hours, not two
+minutes. Every elevated reading this arm has produced was corruption, and the supporting
+evidence agrees: 900 checksum-validated reads at rest show zero corruption (so the fault is
+load-dependent), every direct read before and after a run has been at ambient, and the
+reported "hot" joint was `shoulder_pan` — which rotates about a vertical axis and carries
+almost no gravity load, so it should be the *coolest* if work were the cause.
 
-Two further reasons to doubt it. **The hot joint is the wrong joint**: one run reported
-`shoulder_pan` at 46 °C while lift and elbow sat at 32, but pan rotates about a vertical axis
-and carries almost no gravity load, so if work caused heating those two should lead, not
-trail by 14 °C. And an absolute ceiling **cannot catch the readings that matter** — it rejects
-150 °C, while every ambiguous reading sits in the 38-61 band and passes.
+Note what made this hard to see: `max_temp_c` is a maximum over hundreds of reads, which is
+precisely the statistic a single bad read inflates. A mean, or the series, would have shown it
+immediately. Runs now publish `temperatures.jsonl` for that reason.
 
-So the filter is now a **slew rate**: a servo has thermal mass and cannot move more than a
-few degrees between reads a second apart, whereas a corrupted byte can move it anywhere.
-That rejects corruption inside the plausible band, which is where it changes behaviour. Each
-run also publishes `temperatures.jsonl`, the full series, so the question is answerable from
-its own artifacts rather than from a maximum.
+**What is kept, and why.** The temperature check stays, because it is nearly free and a real
+thermal fault would be unrecoverable — but it now rejects readings that imply an impossible
+*rate of change*, not merely an impossible value, since every misleading reading sat in the
+plausible 38-61 band and passed an absolute ceiling. It has never caught a real event.
 
-**What this means for the deadband:** its thermal justification is unproven. It is still
-worth keeping — it demonstrably reduced per-motor work, taking moving steps from 100% to 72%
-— but "the gripper reached 60 °C" should be read as *possibly* a bad read until a run with the
-slew filter and the full series says otherwise.
+**What is switched off.** The command deadband now defaults to 0. It was introduced for this
+non-problem, and separately measured not to smooth the path (end-effector reversals are ~50%
+with it on or off). It does reduce per-motor work, which is why it remains available, but it
+discards commanded travel and should be enabled for a reason you have measured.
 
 ### Thermal duty cycle: the run rests, it does not stop
 
@@ -663,7 +663,7 @@ image, so the commit it pins is changed in one place. That file is injected by e
 | `osmo workflow status` is not a command | It is `osmo workflow query` | — |
 | Stage 04: the client sits at "still waiting for the policy server" and eventually aborts | The server task is still downloading the checkpoint, still loading the model — or it failed. The group is gang-scheduled, so both start together | Read the **policy-server** task's own logs. `policy_wait_s` in `results.json` records how long it took |
 | Stage 04 server dies with `Could not load this library: libtorchcodec_core*.so` | `install_n17.sh` verifies its toolchain by importing torchcodec, which needs ffmpeg — even though serving a policy decodes no video | `apt-get install ffmpeg` in the task, as every other stage does |
-| A servo gets hot fast while the others stay cool, or stage 04 keeps resting to cool | The policy's dither, concentrated in the smallest servo — see **Jitter** | Set `command_deadband_deg` / `command_deadband_gripper`. Do not raise `max_servo_temp_c`; at 70 °C the servo cuts its own torque and drops the arm |
+| A servo appears to get hot fast while the others stay cool | Almost certainly bus corruption, not heat. Measured heating on this arm is ~0.25 °C/min, so a jump of tens of degrees in minutes is not physical | Check `temperatures.jsonl` for whether the value was sustained or a lone spike, and `bad_temp_reads` for how often the bus is lying |
 | Stage 04 stops with "reached the N-rest limit" | The arm cannot sustain this duty cycle | Shorten `episode_timeout_s`, widen the deadband, or lower `speed`. Raising `max_cooldowns` only makes it cycle longer |
 | Stage 04 rests repeatedly with implausible temperatures, and `rested_s` is near zero | Corrupted serial reads, not hot servos. A rest that ends instantly is the tell — the re-read came back normal | Already guarded: readings above 90 °C are discarded and a rest needs `temp_confirm_reads` consecutive confirmations. `bad_temp_reads` counts the rejects |
 | Stage 04 stops with "servos did not cool within" | Something is still drawing current with torque off | Check the arm is not resting against a hard stop or holding an object under load |

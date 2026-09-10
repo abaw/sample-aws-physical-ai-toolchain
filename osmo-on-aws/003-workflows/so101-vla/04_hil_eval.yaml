@@ -102,15 +102,19 @@ default-values:
   # How long the return-to-start move is interpolated over. Match it to how far the arm
   # actually has to travel: left short, the goal runs ahead of the arm and the return
   # happens at whatever `speed` allows rather than as a controlled ramp.
-  # Hold the previous command when a joint's target moves less than this. The policy does
-  # not hold still: its chunks reverse direction on 24-68% of steps where the recordings it
-  # imitates reverse on under 1%, and four of six joints in those recordings are exactly
-  # stationary more than half the time. The amplitude is a few tenths of a degree, so the
-  # arm goes nowhere while paying acceleration current every step — which took the gripper
-  # to 60C in two minutes. Raising denoising_steps does NOT fix this; measured flat from 4
-  # to 32. Set 0 to disable and see the raw policy output.
-  command_deadband_deg: 0.5
-  command_deadband_gripper: 1.0
+  # Hold the previous command when a joint's target moves less than this, which reproduces
+  # the dwell the recordings have — this policy does not hold still, reversing direction on
+  # 24-68% of steps against under 1% for the teleop it imitates.
+  #
+  # OFF by default, and that is a retraction. It was added to stop the gripper overheating,
+  # on a reading of 60C after two minutes. Direct measurement showed that is impossible:
+  # dithering the gripper harder than the policy ever did, for four minutes, moves it one
+  # degree. Every elevated reading was bus corruption. It also does not smooth the path —
+  # end-effector reversals are unchanged at ~50% with it on or off. It does reduce per-motor
+  # work, but that was solving a non-problem and it discards commanded travel, so switch it
+  # on for a measured reason.
+  command_deadband_deg: 0
+  command_deadband_gripper: 0
   # Thermal duty cycle. Their own limit is 70C, at which a servo cuts torque and drops the
   # arm, so the run pauses well short of it: the arm returns to where the episode began,
   # torque comes off, and it rests until every servo is back under resume_servo_temp_c.
