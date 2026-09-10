@@ -443,21 +443,54 @@ Two things this rules out, both measured rather than assumed:
 - **It is not the re-planning.** Reversals within a single predicted chunk (57%) match those
   at chunk boundaries (55%), so the chunk itself is jittery, not the seam between chunks.
 
-The mitigation is `command_deadband_deg` / `command_deadband_gripper`: hold the previous
-command until the target moves more than the threshold, which reproduces the dwell the
-recordings have. Replayed against a real run's commands:
+### Per-joint reversals measure servo work, not path quality — do not confuse the two
 
-| deadband (arm / gripper) | reversals | arm travel kept | gripper travel kept |
+A reversal in one joint does not imply the end effector reverses: joints can move against
+each other, and a 5-DOF arm on a 3-DOF position task has a null space to do it in. So the
+per-joint figure is the right metric for **heating**, which is per-motor, and the wrong one
+for **motion quality**, which is a property of the path.
+
+Measured both ways, with approximate forward kinematics (swept across link lengths, since
+the metric only asks whether direction flips, so scale cannot change the answer), counting
+only steps that actually moved:
+
+| | worst joint | end effector | steps that moved |
+|---|---|---|---|
+| teleop recordings | 1.3% | **4.8%** | 89.9% |
+| raw policy output | 57.2% | **49.0%** | 100% |
+| after the deadband | 7.9% | **50.1%** | 72.0% |
+
+Two things follow, and the second one is easy to get wrong.
+
+**The jitter is real in task space.** For the raw policy the two metrics agree (57% vs 49%),
+so the joint-space finding was not an artifact of measuring the wrong thing.
+
+**The deadband does not smooth the path.** It takes the worst joint from 57% to 8%, and the
+end effector from 49% to **50%** — unchanged. What it actually does is make the moves fewer
+and larger: the fraction of steps that move at all drops from 100% to 72%. That is a real and
+sufficient fix for the thermal problem, because heating is per-motor work, and it is not a
+fix for motion quality at all. A per-joint threshold cannot smooth a path, because each joint
+crosses its threshold at a different moment and the combination is a staircase.
+
+So read `held_by_deadband` as "how much servo work was avoided", never as "how much smoother
+the motion became".
+
+The deadband costs nothing for sustained motion — it accumulates past the threshold within a
+step or two, so it is a quantization rather than the phase lag a low-pass filter would add.
+Replayed against a real run's commands, in joint space:
+
+| deadband (arm / gripper) | worst-joint reversals | arm travel kept | gripper travel kept |
 |---|---|---|---|
 | off | 39-60% | 100% | 100% |
 | 0.3 / 0.5 | 11-21% | 79-96% | 75% |
 | **0.5 / 1.0** (default) | **2-12%** | **74-91%** | 48% |
 | 1.0 / 2.0 | 0-3% | 34-86% | 34% |
 
-A deadband costs nothing for sustained motion — it accumulates past the threshold within a
-step or two, so this is a quantization, not a lag, which is why it is preferred to a
-low-pass filter in a loop that already spends 400 ms per round trip. `held_by_deadband` in
-`results.json` records how often each joint was held.
+**What would actually smooth the path, and is not implemented:** smooth each predicted chunk
+before executing it. The whole 16-step chunk is in hand before the first step is sent, so it
+can be filtered *non-causally* — a short centred moving average or Savitzky-Golay across the
+chunk — which removes step-to-step noise at zero phase lag, the objection that rules out a
+causal low-pass here. Untested; the chunk boundaries would need care.
 
 **Stage 03 now measures this** and warns above `smoothness_warn_reversals`. It does not fail
 the stage, because a jittery policy is still drivable with the deadband — but it is no longer
