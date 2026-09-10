@@ -388,6 +388,34 @@ does.
 
 ### Jitter: this policy does not hold still, and the error metrics cannot see it
 
+**"Reversals" means: the fraction of commands at which a joint changes direction.** For
+consecutive commanded positions `v[i-1], v[i], v[i+1]`, sample `i` is a reversal when
+`(v[i] - v[i-1]) * (v[i+1] - v[i]) < 0` — the joint was travelling one way and now travels
+the other.
+
+```
+10.0 -> 10.2 -> 10.4 -> 10.6      0%     monotonic, going somewhere
+10.0 -> 10.3 -> 10.1 -> 10.4    ~100%    changing direction every step
+```
+
+The metric is deliberately **scale-free**: a slow smooth move and a fast smooth move both
+score near zero, and only oscillation scores high. Amplitude alone cannot separate
+"traversing the workspace" from "vibrating in place", and vibrating in place is what
+overheats a servo.
+
+What the scale means, from synthetic references:
+
+| signal | reversals |
+|---|---|
+| clean monotonic ramp | 0% |
+| **teleop recordings (this dataset)** | **0-0.6%** |
+| random walk | 50% |
+| noise superimposed on a slow ramp | 62% |
+| uncorrelated noise | 67% (analytically 2/3) |
+
+So a policy in the 40-70% band is emitting per-step increments with almost no trend — close
+to uncorrelated. That is the diagnosis, not just a large number.
+
 Measured on the fine-tuned checkpoint, against the recordings it was trained on:
 
 | | direction reversals, worst joint | per-step size, p50 |

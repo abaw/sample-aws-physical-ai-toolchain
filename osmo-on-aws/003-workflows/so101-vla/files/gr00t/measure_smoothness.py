@@ -42,7 +42,13 @@ def reversal_rate(series: list[float]) -> float:
 
     The statistic the hardware run needed and stage 03 never computed. Scale-free, so a
     smooth slow trajectory and a smooth fast one both score near zero, and only
-    oscillation scores high.
+    oscillation scores high — amplitude alone cannot tell traversing the workspace apart
+    from vibrating in place, and it is the latter that overheats a servo.
+
+    For calibration against known signals: a clean monotonic ramp scores 0, a random walk
+    50%, noise on a slow ramp 62%, and uncorrelated noise 67% (analytically 2/3). Teleop
+    recordings of this task score under 1%, so a policy in the 40-70% band is emitting
+    per-step increments with almost no trend.
     """
     if len(series) < 3:
         return float("nan")
