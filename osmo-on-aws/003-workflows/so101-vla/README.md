@@ -322,7 +322,7 @@ Consequences, in order of how much they actually buy:
    *policy-quality* decision, not just plumbing: the model resizes internally anyway (640×480 costs
    only 5.5 ms more inference than 224×224), but pre-shrinking discards detail it might have used, and
    your dataset was recorded at one particular resolution. Score the result, do not assume.
-3. **Move the policy closer** — `inference_site=edge`, which needs a GPU on the edge machine and the
+3. **Move the policy closer** — `policy_placement=with_robot`, which needs a GPU on the arm machine and the
    platform this repo does not create. On this WAN path **a 30 Hz closed loop is not reachable at any
    horizon the checkpoint supports**; ~12 Hz is what it does. If you need 30 Hz, you need the policy
    on the same machine.
@@ -342,20 +342,73 @@ on one dropped packet is worse, because the arm falls under gravity and drops wh
 Run a `no_motion` rehearsal, read `chunk_latency` out of `results.json`, and set `action_horizon` and
 `policy_timeout_ms` from *those* numbers before a powered episode.
 
-### Cloud or edge inference
+### Where the policy runs
 
-`inference_site` switches where the policy runs. **`cloud` is the default and the only validated
-path.**
+`policy_placement` decides whether the policy shares a node with the robot. **`own_platform` is the
+default and the only validated path.**
+
+| value | policy runs on | the loop |
+|---|---|---|
+| `own_platform` | `policy_platform` — a GPU node | crosses the network twice per re-plan |
+| `with_robot` | `robot_platform` — the arm's own machine | never leaves the machine |
 
 ```bash
---set inference_site=edge edge_policy_platform=<your-gpu-edge-platform>
+--set policy_placement=with_robot
 ```
 
-**`edge` names a platform this repo does not create.** A GPU on a hybrid node needs a device-plugin
-design — driver container, container toolchain, device plugin, scoped to whatever distribution the
-on-premise machine runs — that does not exist here, and the reference machine has no GPU to validate
-it against. The switch is built and the robot task is unchanged either way; adding the platform and
-proving the branch is an operator's job. Do not read the presence of the flag as support for it.
+*This was `inference_site: cloud|edge` until 2026-09-14.* The old name described a deployment
+topology, but nothing here cares whether a node sits in a cloud — what matters is whether the policy
+shares a host with the arm, which is what sets the round-trip cost. `own_platform` is also honest about
+the case the old name could not express: a separate on-premise GPU node, neither cloud nor edge.
+
+**How co-location is expressed.** A platform selects nodes through its pod template's
+`nodeSelector`, so putting both tasks on the *same platform* puts them on the same machine. With `with_robot` the policy task's platform simply **is** `robot_platform` — derived, not configured
+separately, so the two cannot be pointed at different machines and cannot drift apart if
+`robot_platform` later changes. There is no `edge_policy_platform`; it would only be a way to get
+this wrong.
+
+That one platform can serve both tasks because **a task may request `gpu: 1` on a platform whose
+`USER_GPU` default is 0, and the request is honoured** — so a GPU task and a device task coexist on
+one platform without needing a second.
+
+Two consequences worth knowing:
+
+- **Same-node pod traffic never enters the overlay or the tunnel.** That is where the ~230 ms in the
+  latency table goes, so co-location — not a faster model or a smaller payload — is what would make
+  30 Hz reachable.
+- **Co-location holds because exactly one node carries the label.** It is not an enforced affinity
+  rule. A second labelled node would let the two tasks land on different machines **silently**, with
+  no error; the only symptom is `chunk_latency` returning to cloud-path values. Running more than one
+  arm means giving each node its own label and platform.
+
+**What a GPU-equipped arm platform needs beyond `so101-edge`:** the NVIDIA container runtime. `so101-edge` pins
+`runtimeClassName: runc` precisely because its node has no GPU, and a GPU task under `runc` gets no
+devices. So a GPU-equipped arm machine wants its own platform — same nodeSelector and toleration,
+same `USER_GPU: 0` and `allowed_mounts`, but the NVIDIA runtime.
+
+**`with_robot` is unvalidated and cannot be validated here.** The reference machine has no GPU, so
+the policy pod requests `nvidia.com/gpu: 1` against a node advertising 0 and stays **Pending
+indefinitely** — and because the group is gang-scheduled, the robot task waits with it. Expect a hang
+rather than an error. Putting a GPU on a hybrid node needs a device-plugin design (driver container,
+container toolchain, device plugin, on an arbitrary on-premise distribution) that does not exist in
+this repo.
+
+**You must size the policy task down by hand for `with_robot`.** The `policy_cpu` / `policy_memory_gi` /
+`policy_storage_gi` defaults suit a dedicated GPU node and do not fit an arm machine, which has 6
+usable vCPU and 11 Gi in total and is already running the robot task — plus a fixed 1 vCPU of
+`osmo-ctrl` sidecar per task. Something like:
+
+```bash
+--set policy_placement=with_robot policy_cpu=2 policy_memory_gi=7 policy_storage_gi=45
+```
+
+Storage goes *up* while cpu and memory come down, because with `with_robot` the checkpoint (~24 GiB),
+toolchain (~15 GiB) and base model (~15 GiB) all download over that machine's own internet link
+instead of from inside AWS. That download is the real counterweight to saving ~230 ms per round trip.
+
+**Oversizing is not caught at submit time.** OSMO validates resources per *task*, not per group, so an
+oversized policy task passes validation and the group then fails to gang-schedule. Read a failure to
+start under `with_robot` as a sizing problem first.
 
 ### Your machine's device paths are not ours
 
@@ -660,7 +713,7 @@ scales a node group up or down for you.
 | 03 open-loop eval | Validated | Against 10-step, 6,000-step and 10,000-step checkpoints — the error metric separates them by two orders of magnitude. **It does not measure smoothness**, which is why that is now reported separately |
 | 04 HIL, `no_motion` rehearsal | Validated on real hardware | Both tasks gang-scheduled, the client resolved the policy task's host and connected, EEPROM matched the recording calibration, unit conversion agreed with LeRobot on all six joints, both cameras opened at the dataset's resolution, and the loop ran 29 replans over 30 s with zero writes to the servo bus |
 | 04 HIL, powered episode | Validated on real hardware | One 15 s episode at capped speed: torque engaged holding the present pose, the policy drove the arm closed-loop for 254 steps over 16 replans at 16.9 Hz, the arm returned to within 1 deg of its start pose on every joint, and torque was released and verified off on all six |
-| 04 HIL, `inference_site=edge` | **Not validated, and cannot be here** | Needs a GPU on the edge machine and a platform this repo does not create |
+| 04 HIL, `policy_placement=with_robot` | **Not validated, and cannot be here** | Needs a GPU on the arm machine, which the reference hardware does not have |
 | 04 HIL, 30 Hz closed loop | **Not reachable over this WAN** | 15.2 Hz at the default horizon. Not payload-bound and not inference-bound — see the latency section |
 | 04 HIL, sustained multi-episode run | **Not yet achieved** | A 20-episode attempt aborted 2 minutes in on gripper temperature, before the deadband existed. The abort worked as designed and the servo cooled with no damage; the run has not been repeated since |
 | Task success | **Unmeasured** | No episode has been scored. There is no sensor for it — success is the operator's verdict, recorded through the control directory |

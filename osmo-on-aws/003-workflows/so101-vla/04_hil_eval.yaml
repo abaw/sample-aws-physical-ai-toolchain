@@ -27,11 +27,12 @@
 default-values:
   model: gr00t-n17
 
-  # cloud | edge. `cloud` serves the policy on a GPU node and crosses the WAN twice per
-  # replan; `edge` serves it on the robot's own machine. See README.md: the edge branch
-  # names a platform this repo does not create, because a GPU on a hybrid node needs a
-  # device-plugin design that does not exist here.
-  inference_site: cloud
+  # Whether the policy shares a node with the robot. `with_robot` reuses robot_platform, so
+  # the loop never leaves the machine; `own_platform` uses policy_platform. See README.md.
+  #
+  # `with_robot` is UNVALIDATED. On a GPU-less node the policy pod stays Pending and, being
+  # gang-scheduled, hangs the robot task with it — a hang, not an error.
+  policy_placement: own_platform
 
   # Name a single checkpoint-<step>/ prefix from a stage 02 run, and never the base
   # model: nvidia/GR00T-N1.7-3B has no new_embodiment entry in its processor and raises
@@ -44,19 +45,13 @@ default-values:
   # paraphrase is a different prompt.
   lang_instruction: "REPLACE-WITH-YOUR-TASK-DESCRIPTION"
 
-  # Steps of each predicted chunk executed before re-planning, and the rate they are
-  # executed at. 16 at 30 Hz buys 533 ms of motion per round trip.
-  #
-  # 16 is the measured answer, not the predicted one: component measurements (61 ms of
-  # node-to-node ICMP + ~9 ms serialization + 146 ms in-process inference = 216 ms) say
-  # horizon 8 fits, and the real pod-to-pod path costs ~380 ms at the median. 16 is also
-  # the ceiling here, because it is the chunk length the checkpoint was trained with — the
-  # client refuses a larger horizon rather than executing a short chunk. See README.md, and
-  # set this from a no_motion rehearsal on your own link.
+  # One chunk buys action_horizon/control_hz of motion — 533 ms here. 16 is also the ceiling,
+  # being the chunk length the checkpoint was trained with; the client refuses more rather
+  # than executing a short chunk. Set it from a no_motion rehearsal on your own link.
   action_horizon: 16
   control_hz: 30
-  # Same value stage 03 evaluated at. Fewer steps is faster and slightly less accurate,
-  # and it is the largest single lever on inference latency.
+  # Must match what stage 03 evaluated at, or you are driving hardware with a model
+  # configuration you never scored.
   denoising_steps: 4
 
   max_episodes: 1
@@ -82,18 +77,9 @@ default-values:
   # much better than a fast one.
   acceleration: 20
   speed: 600
-  # Receive timeout in the control loop, and how many times a request is retried. On a
-  # timeout the arm holds its last commanded pose; when the retries run out the episode
-  # aborts and the arm is returned and released.
-  #
-  # The worst-case time the arm can hold a stale pose is (policy_retries + 1) x
-  # policy_timeout_ms, so with these values it is 3 s. That arithmetic is the point of
-  # both numbers: upstream's client defaults to a 15 s timeout, which at this loop's round
-  # trip is not a timeout but an outage.
-  #
-  # The timeout must sit above the round-trip p99 for YOUR link or episodes will abort on
-  # healthy network jitter. Measured p99 is ~890 ms and max ~1020 ms, and at 1000 one
-  # request in fifty timed out and had to be retried; see README.md.
+  # The arm can hold a stale pose for at most (policy_retries + 1) x policy_timeout_ms —
+  # 3 s here. Set the timeout above your own round-trip p99 or episodes abort on healthy
+  # jitter; ~890 ms was measured here. See README.md.
   policy_timeout_ms: 1500
   policy_retries: 1
   # The ping and warm-up calls run with the arm limp and include the model's
@@ -102,36 +88,16 @@ default-values:
   # How long the return-to-start move is interpolated over. Match it to how far the arm
   # actually has to travel: left short, the goal runs ahead of the arm and the return
   # happens at whatever `speed` allows rather than as a controlled ramp.
-  # Hold the previous command when a joint's target moves less than this, which reproduces
-  # the dwell the recordings have — this policy does not hold still, reversing direction on
-  # 24-68% of steps against under 1% for the teleop it imitates.
-  #
-  # OFF by default, and that is a retraction. It was added to stop the gripper overheating,
-  # on a reading of 60C after two minutes. Direct measurement showed that is impossible:
-  # dithering the gripper harder than the policy ever did, for four minutes, moves it one
-  # degree. Every elevated reading was bus corruption. It also does not smooth the path —
-  # end-effector reversals are unchanged at ~50% with it on or off. It does reduce per-motor
-  # work, but that was solving a non-problem and it discards commanded travel, so switch it
-  # on for a measured reason.
+  # Holds the previous command below this threshold, suppressing the policy's dither. OFF by
+  # default: it reduces per-motor work but does NOT smooth the path, and it discards
+  # commanded travel. See README.md before enabling.
   command_deadband_deg: 0
   command_deadband_gripper: 0
-  # Thermal duty cycle. Per the vendor memory table these servos hold Max_Temperature_Limit
-  # (0x0D) at 70 C with overheat protection enabled in Unloading_Condition (0x13), and a
-  # protection event derates output to Protective_Torque (0x22) -- 20% of maximum, not zero.
-  # The run pauses short of that: the arm returns to where the episode began,
-  # torque comes off, and it rests until every servo is back under resume_servo_temp_c.
-  # Torque must be off to cool at all — a servo holding a pose against gravity keeps
-  # drawing current — which is why resting means releasing rather than just pausing.
-  #
-  # A rest re-attempts the same episode rather than consuming it, so max_episodes counts
-  # real attempts and a hot arm costs wall clock instead of coverage. Budget exec_timeout
-  # for that: each rest has been about a minute from 55C to 45C with torque off.
+  # At this temperature the run rests rather than stopping: the arm returns, torque comes
+  # off (it cannot cool while holding a pose), and the episode is re-attempted rather than
+  # consumed. Budget exec_timeout for the rests. See README.md for the servos' own limits.
   max_servo_temp_c: 55
-  # Consecutive over-ceiling readings needed before resting. One corrupted read is not a
-  # hot servo: the bus mangles a packet occasionally, and a single byte read wrong is
-  # indistinguishable from a real value except by being impossible. Readings above 90C are
-  # discarded outright for the same reason — a servo that hot would already have cut its
-  # own 70 C limit.
+  # One corrupted read is not a hot servo, and this bus does corrupt reads.
   temp_confirm_reads: 3
   # Well below the pause threshold. Without the gap the run would stop and start every few
   # seconds instead of actually resting.
@@ -175,18 +141,21 @@ default-values:
   calibration_localpath: ""
 
   # --- resources ------------------------------------------------------------
-  policy_platform: l40s
-  # Not created by this repo. See README.md.
-  edge_policy_platform: so101-edge-gpu
   robot_platform: so101-edge
   policy_port: 5555
 
-  policy_cpu: 4
-  policy_memory_gi: 32
   # A stage 02 checkpoint is ~24 Gi, over half of which is optimizer state the server
   # never reads — OSMO downloads the whole prefix regardless.
   checkpoint_size_gi: 25
-  # Toolchain venv (~15 Gi) + the base model pulled by the processor (~15 Gi).
+
+  # Used only when policy_placement is `own_platform`.
+  policy_platform: l40s
+
+  # Sized for a dedicated GPU node. SIZE DOWN for policy_placement=with_robot, where the arm
+  # machine has 6 vCPU and 11 Gi shared with the robot task — see README.md. Oversizing is not
+  # caught at submit time: resources validate per task, so the group fails to gang-schedule.
+  policy_cpu: 4
+  policy_memory_gi: 32
   policy_storage_gi: 40
 
   # The machine has ~6 usable vCPU and `cpu` must be an integer, and the osmo-ctrl
@@ -221,15 +190,15 @@ workflow:
   name: so101-{{ model }}-hil-eval
   resources:
     policy:
-{% if inference_site == 'edge' %}
-      platform: "{{ edge_policy_platform }}"
+{% if policy_placement == 'with_robot' %}
+      platform: "{{ robot_platform }}"
 {% else %}
       platform: "{{ policy_platform }}"
 {% endif %}
-      gpu: 1
       cpu: {{ policy_cpu }}
       memory: {{ policy_memory_gi }}Gi
       storage: {{ policy_storage_gi + checkpoint_size_gi }}Gi
+      gpu: 1
     robot:
       platform: "{{ robot_platform }}"
       cpu: {{ robot_cpu }}
@@ -354,18 +323,10 @@ workflow:
             --index-url https://download.pytorch.org/whl/cpu \
             "torch=={{ torch_version }}" "torchvision=={{ torchvision_version }}"
 
-          # Source tarballs, not git+: this image has no git, and a tarball is a ~10 MB
-          # fetch against a full clone.
-          #
-          # One resolve, not several. transformers and lerobot disagree about
-          # huggingface-hub, and installing them separately lets the second one silently
-          # downgrade the first one's dependency; resolved together, pip picks a
-          # transformers that accepts the hub version lerobot needs.
-          #
-          # transformers is here only because gr00t's policy package imports Gr00tPolicy
-          # at package level, so it is reached even though this task never builds a model.
-          # The three wire libraries are pinned to the versions gr00t itself pins, because
-          # they are what encodes the observation on the way to the server.
+          # Tarballs because this image has no git. One resolve, not several: installed
+          # separately, transformers and lerobot silently downgrade each other's
+          # huggingface-hub. transformers is needed only because gr00t imports Gr00tPolicy
+          # at package level.
           pip install --quiet --root-user-action=ignore \
             "lerobot[feetech] @ https://github.com/huggingface/lerobot/archive/{{ lerobot_commit }}.tar.gz" \
             "transformers=={{ transformers_version }}" \
