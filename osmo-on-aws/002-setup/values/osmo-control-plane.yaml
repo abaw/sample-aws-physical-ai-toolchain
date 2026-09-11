@@ -258,8 +258,23 @@ services:
             description: "L40S GPU platform"
             host_network_allowed: false
             privileged_allowed: false
-            default_variables:
-              USER_GPU: 1
+            # No USER_GPU default, so a task gets a GPU only by asking for one.
+            #
+            # This was 1, which meant every task on this platform received the card whether
+            # it used it or not — a dataset-preparation stage with no CUDA in it held the
+            # only L40S for minutes. A task cannot decline it either: OSMO reads an integer
+            # `gpu: 0` as absent, so the default wins and there is no way to opt out from
+            # the workflow side. The asymmetry is the point — a task CAN raise a zero
+            # default by asking for `gpu: 1`, and that request is honoured, so defaulting to
+            # zero loses nothing and makes the intent explicit at the point of use.
+            #
+            # It also matches upstream, whose own chart defaults pair a `cpu` platform whose
+            # pod template omits the GPU key with a separate `gpu` platform, rather than
+            # relying on `gpu: 0` to opt out.
+            #
+            # The pool's common_default_variables still supply USER_GPU: 0, which the
+            # built-in default_user template renders as `nvidia.com/gpu: "0"` — a valid
+            # request for none, as every so101-edge task already demonstrates.
             # Per-platform rather than the pool's common_pod_template: only GPU training
             # tasks need the shared-memory volume. A platform's overrides merge on top of
             # the pool's common list, they do not replace it.

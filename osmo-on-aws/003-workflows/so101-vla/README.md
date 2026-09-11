@@ -26,11 +26,18 @@ tells them apart for the price of a few GPU-minutes. Treat it as a stop/go gate,
 
 ## Prerequisites
 
-**A pool with a GPU platform.** All three stages default to `platform: l40s`, the platform this repo's
-setup creates; override per stage with `--set prep_platform=`, `train_platform=`, `eval_platform=`.
-Stage 01 needs no GPU but requests the GPU platform anyway, because a platform that sets `USER_GPU` in
-its `default_variables` grants a GPU regardless — OSMO reads `gpu: 0` as absent, not as an override.
-Point it at a CPU platform if your pool has one with ≥ 2 spare vCPU.
+**A pool with a GPU platform.** All stages default to `platform: l40s`, the platform this repo's setup
+creates; override per stage with `--set prep_platform=`, `train_platform=`, `eval_platform=`.
+Stage 01 needs no GPU and does not request one, so it leaves the card free while still using that
+platform's spare CPU. Point it at a CPU platform if your pool has one with ≥ 2 spare vCPU.
+
+**If your GPU platform sets `USER_GPU` in `default_variables`, stage 01 will consume a GPU it never
+uses**, and there is nothing a workflow can do about it: OSMO reads an integer `gpu: 0` as *absent*, so
+the platform default wins and a task cannot opt out. The asymmetry is worth knowing — a task **can**
+raise a zero default by asking for `gpu: 1`, and that request is honoured — so a platform is better off
+defaulting to none and letting each task state its own need. This repo's `l40s` platform is configured
+that way, and upstream's own chart defaults follow the same pattern, pairing a CPU platform whose pod
+template omits the GPU key with a separate GPU platform.
 
 **A Hugging Face token, as an OSMO credential:**
 

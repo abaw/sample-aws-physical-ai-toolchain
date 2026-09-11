@@ -91,12 +91,13 @@ workflow:
   name: so101-prepare-dataset
   resources:
     prep:
-      # Nothing here needs a GPU and none is requested. A GPU platform is used anyway
-      # because it is the only one with spare CPU in the reference pool — and a platform
-      # that sets `USER_GPU` in `default_variables` grants a GPU regardless, since OSMO
-      # reads `gpu: 0` as absent rather than as an override. Point `prep_platform` at a
-      # CPU platform if the cluster has one with >= 2 spare vCPU (`cpu` must be an
-      # integer, and the osmo-ctrl sidecar adds a fixed 1).
+      # Nothing here needs a GPU and none is requested, so none is allocated. A GPU
+      # platform is used anyway because it is the only one with spare CPU in the reference
+      # pool; the card stays free for other work. This depends on that platform not setting
+      # `USER_GPU` in `default_variables` — where one does, every task on it receives a GPU
+      # and cannot decline, because OSMO reads an integer `gpu: 0` as absent rather than as
+      # a request for none. Point `prep_platform` at a CPU platform if the cluster has one
+      # with >= 2 spare vCPU (`cpu` must be an integer, and the osmo-ctrl sidecar adds 1).
       platform: "{{ prep_platform }}"
       cpu: 4
       memory: 32Gi
