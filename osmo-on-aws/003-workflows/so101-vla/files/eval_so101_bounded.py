@@ -304,10 +304,10 @@ class ArmDriver:
     def torque_state(self) -> dict[str, int]:
         return self.bus.sync_read("Torque_Enable", normalize=False)
 
-    # Above the servos' own Max_Temperature_Limit, which reads 70 on this arm. Whatever that
-    # limit does, a reading past it is a corrupted packet rather than a hot motor: the bus
-    # mangles one occasionally, and a byte read wrong is indistinguishable from a real value
-    # except by being impossible.
+    # Above the servos' Max_Temperature_Limit (register 0x0D), which the vendor memory table
+    # documents in degrees Celsius and which reads 70 on this arm. A value past it is a
+    # corrupted packet rather than a hot motor: the bus mangles one occasionally, and a byte
+    # read wrong is indistinguishable from a real value except by being impossible.
     IMPLAUSIBLE_TEMP_C = 90
 
     # Degrees a servo may plausibly change between consecutive reads, which are about a
@@ -1126,9 +1126,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-servo-temp-c",
         type=int,
         default=55,
-        help="Pause and rest if any servo reaches this. Their own Max_Temperature_Limit "
-        "reads 70 and Unloading_Condition is set, so a fault there drops or reduces torque "
-        "with the arm wherever it is; this stops short of that, under control.",
+        help="Pause and rest if any servo reaches this. Their Max_Temperature_Limit reads "
+        "70 C with overheat protection enabled, and the vendor table says protection derates "
+        "output to Protective_Torque -- 20%% of maximum here, not zero. This stops short of "
+        "that, while the arm is still fully driven.",
     )
     g.add_argument(
         "--temp-confirm-reads",

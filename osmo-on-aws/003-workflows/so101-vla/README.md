@@ -431,8 +431,8 @@ same amount of servo work while oscillating rather than progressing.**
 That is not cosmetic. The first long hardware run aborted after two minutes because the
 **gripper reached 60 °C** while every other joint sat at its resting temperature: it is the
 smallest servo with the least thermal mass, and it was being driven continuously through
-dwell periods it should have spent stationary. Their `Max_Temperature_Limit` reads 70, past
-which a protection fault would take the arm out of software's hands.
+dwell periods it should have spent stationary. Their `Max_Temperature_Limit` reads 70 °C, past
+which the servo derates its own output and takes the arm partly out of software's hands.
 
 Two things this rules out, both measured rather than assumed:
 
@@ -557,15 +557,23 @@ episodes without it.
 limit is what turns a thermal stop into a controlled return rather than a protection fault
 mid-motion.
 
-**What is actually known about that limit**, since it is easy to overstate and was overstated
-here. Measured on this arm: `Max_Temperature_Limit` is **70**, `Unloading_Condition` is **44**
-(non-zero, so the servo is configured to shed torque on *some* fault set), `Protective_Torque`
-is **20**, and `Status` reads 0 on all six. Two things follow that are **not** established:
-which bit of `Unloading_Condition` corresponds to temperature, and whether "unload" means zero
-torque or a drop to `Protective_Torque` — 20% might still hold this arm, or let it sag. It has
-not been tested, and testing it by overheating a servo is not worth the part. One corroborating
-detail is real, though: `Overload_Torque` is **25 on the gripper against 80** on the arm
-joints, so the vendor's own configuration treats the gripper as the fragile one.
+**What the limit actually does**, from the vendor memory table rather than from the register
+names — FEETECH magnetic-encoder memory table, 舵机协议内存表-磁编码版本.xlsx, linked from feetechrc.com "Communication Protocol & Memory Table":
+
+| register | this arm | what the table says |
+|---|---|---|
+| `0x0D` max temperature limit | 70 | unit is **°C**; "max working temperature limit, precision 1 °C" |
+| `0x13` unloading condition | 44 | bitmask of *enabled* protections. BIT2 = overheat, BIT3 = overcurrent, BIT5 = overload. `44 = 32+8+4`, so **overheat protection is on** |
+| `0x22` protective torque | 20 | unit 0.01: "output torque after entering protection" — so **20% of maximum, not zero** |
+| `0x41` status | 0 | BIT2 reports overheat; no servo is currently faulted |
+
+So at 70 °C the servo **derates to 20% torque rather than releasing.** An earlier version of this
+document said it "cuts its own torque and drops the arm", which was wrong — inferred from
+register names before the table was consulted. Whether 20% holds this arm or lets it sag is a
+physical question nobody here has tested.
+
+Also from the table: `0x24` overload torque is **25 on the gripper against 80** on the arm
+joints, so the vendor configuration treats the gripper as the joint to protect.
 
 ### Reading `results.json`
 
