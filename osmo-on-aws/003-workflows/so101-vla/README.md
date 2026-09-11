@@ -431,8 +431,8 @@ same amount of servo work while oscillating rather than progressing.**
 That is not cosmetic. The first long hardware run aborted after two minutes because the
 **gripper reached 60 °C** while every other joint sat at its resting temperature: it is the
 smallest servo with the least thermal mass, and it was being driven continuously through
-dwell periods it should have spent stationary. At 70 °C these servos cut their own torque
-and drop the arm — the one failure mode software cannot intervene in.
+dwell periods it should have spent stationary. Their `Max_Temperature_Limit` reads 70, past
+which a protection fault would take the arm out of software's hands.
 
 Two things this rules out, both measured rather than assumed:
 
@@ -530,8 +530,8 @@ discards commanded travel and should be enabled for a reason you have measured.
 
 ### Thermal duty cycle: the run rests, it does not stop
 
-These servos cut their own torque at 70 °C and drop the arm, which is the one failure mode
-no software can intervene in. So the client reads `Present_Temperature` once per re-plan and,
+A servo protection fault takes the arm out of software's hands, which is the one failure mode
+nothing here can intervene in — see the note below on what is actually known about it. So the client reads `Present_Temperature` once per re-plan and,
 at `max_servo_temp_c`, **rests rather than ending the run**: the arm returns to where the
 episode began, torque comes off, and it waits until every servo is back under
 `resume_servo_temp_c` before re-attempting the episode.
@@ -553,8 +553,19 @@ cycling forever. Measured with the deadband on, three 60 s episodes peaked at 53
 recovered between episodes rather than accumulating — against 60 °C and climbing in two
 episodes without it.
 
-**Do not raise `max_servo_temp_c` to make a run finish.** The headroom to 70 °C is what turns
-a thermal stop into a controlled return instead of the arm going limp mid-motion.
+**Do not raise `max_servo_temp_c` to make a run finish.** The headroom to the servos' own
+limit is what turns a thermal stop into a controlled return rather than a protection fault
+mid-motion.
+
+**What is actually known about that limit**, since it is easy to overstate and was overstated
+here. Measured on this arm: `Max_Temperature_Limit` is **70**, `Unloading_Condition` is **44**
+(non-zero, so the servo is configured to shed torque on *some* fault set), `Protective_Torque`
+is **20**, and `Status` reads 0 on all six. Two things follow that are **not** established:
+which bit of `Unloading_Condition` corresponds to temperature, and whether "unload" means zero
+torque or a drop to `Protective_Torque` — 20% might still hold this arm, or let it sag. It has
+not been tested, and testing it by overheating a servo is not worth the part. One corroborating
+detail is real, though: `Overload_Torque` is **25 on the gripper against 80** on the arm
+joints, so the vendor's own configuration treats the gripper as the fragile one.
 
 ### Reading `results.json`
 

@@ -304,10 +304,10 @@ class ArmDriver:
     def torque_state(self) -> dict[str, int]:
         return self.bus.sync_read("Torque_Enable", normalize=False)
 
-    # A servo that genuinely reached this would already have cut its own torque at 70 C, so
-    # a reading above it is a corrupted packet rather than a hot motor. The bus drops or
-    # mangles one occasionally, and a single byte read wrong is indistinguishable from a
-    # real value except by being impossible.
+    # Above the servos' own Max_Temperature_Limit, which reads 70 on this arm. Whatever that
+    # limit does, a reading past it is a corrupted packet rather than a hot motor: the bus
+    # mangles one occasionally, and a byte read wrong is indistinguishable from a real value
+    # except by being impossible.
     IMPLAUSIBLE_TEMP_C = 90
 
     # Degrees a servo may plausibly change between consecutive reads, which are about a
@@ -347,7 +347,7 @@ class ArmDriver:
             print(
                 f"WARNING: rejecting temperature reading(s) {dropped} as bus corruption "
                 f"(last accepted {({j: self.last_temp.get(j) for j in dropped})}); a servo "
-                f"cannot change that fast, and one this hot would have cut its own torque",
+                f"cannot change that fast, and one this hot would be past its own limit",
                 file=sys.stderr,
                 flush=True,
             )
@@ -1126,9 +1126,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-servo-temp-c",
         type=int,
         default=55,
-        help="Pause and rest if any servo reaches this. The servos' own limit is 70C, at "
-        "which they cut torque and drop the arm; this stops well short of that, with the "
-        "arm still under control.",
+        help="Pause and rest if any servo reaches this. Their own Max_Temperature_Limit "
+        "reads 70 and Unloading_Condition is set, so a fault there drops or reduces torque "
+        "with the arm wherever it is; this stops short of that, under control.",
     )
     g.add_argument(
         "--temp-confirm-reads",

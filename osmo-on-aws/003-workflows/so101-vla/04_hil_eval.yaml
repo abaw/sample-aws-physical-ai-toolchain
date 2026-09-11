@@ -115,8 +115,9 @@ default-values:
   # on for a measured reason.
   command_deadband_deg: 0
   command_deadband_gripper: 0
-  # Thermal duty cycle. Their own limit is 70C, at which a servo cuts torque and drops the
-  # arm, so the run pauses well short of it: the arm returns to where the episode began,
+  # Thermal duty cycle. The servos' own Max_Temperature_Limit reads 70 and their
+  # Unloading_Condition is set, so a fault there drops or reduces torque with the arm
+  # wherever it happens to be. The run pauses short of it: the arm returns to where it began,
   # torque comes off, and it rests until every servo is back under resume_servo_temp_c.
   # Torque must be off to cool at all — a servo holding a pose against gravity keeps
   # drawing current — which is why resting means releasing rather than just pausing.
@@ -129,7 +130,7 @@ default-values:
   # hot servo: the bus mangles a packet occasionally, and a single byte read wrong is
   # indistinguishable from a real value except by being impossible. Readings above 90C are
   # discarded outright for the same reason — a servo that hot would already have cut its
-  # own torque at 70C.
+  # own Max_Temperature_Limit of 70.
   temp_confirm_reads: 3
   # Well below the pause threshold. Without the gap the run would stop and start every few
   # seconds instead of actually resting.
