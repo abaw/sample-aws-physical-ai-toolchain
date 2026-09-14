@@ -54,8 +54,12 @@ default-values:
   # configuration you never scored.
   denoising_steps: 4
 
-  max_episodes: 1
-  episode_timeout_s: 60
+  # How long to drive the arm, in total. The only knob for run length.
+  run_duration_s: 20
+  # How long the arm drives before returning to its starting pose and releasing torque,
+  # then starting again. This sets how often the servos get to cool and how often you get
+  # a limp arm to re-stage the scene with. It does not change how long the run lasts.
+  interval_s: 60
 
   # --- safety ---------------------------------------------------------------
   # Rehearsal mode: everything runs, including the policy and the full control loop, and
@@ -78,7 +82,7 @@ default-values:
   acceleration: 20
   speed: 600
   # The arm can hold a stale pose for at most (policy_retries + 1) x policy_timeout_ms —
-  # 3 s here. Set the timeout above your own round-trip p99 or episodes abort on healthy
+  # 3 s here. Set the timeout above your own round-trip p99 or the run aborts on healthy
   # jitter; ~890 ms was measured here. See README.md.
   policy_timeout_ms: 1500
   policy_retries: 1
@@ -94,8 +98,9 @@ default-values:
   command_deadband_deg: 0
   command_deadband_gripper: 0
   # At this temperature the run rests rather than stopping: the arm returns, torque comes
-  # off (it cannot cool while holding a pose), and the episode is re-attempted rather than
-  # consumed. Budget exec_timeout for the rests. See README.md for the servos' own limits.
+  # off (it cannot cool while holding a pose), and driving resumes once it is cool. Resting
+  # is not driving, so a hot arm makes the run take longer in wall-clock rather than drive
+  # for less of it — budget exec_timeout for that. See README.md for the servos' own limits.
   max_servo_temp_c: 55
   # One corrupted read is not a hot servo, and this bus does corrupt reads.
   temp_confirm_reads: 3
@@ -116,8 +121,9 @@ default-values:
   # This is how long the client keeps pinging before it gives up.
   policy_wait_s: 1800
 
-  # Optional: six values in joint order, ramped to at the start of every episode. Without
-  # it the arm starts from wherever it is, which makes repeated episodes incomparable.
+  # Optional: six values in joint order, ramped to at the start of every interval. Without
+  # it each interval starts from wherever the last one left the arm, and the policy is
+  # extrapolating from a pose it never trained on.
   # A pose from the middle of your recording is a good choice — the policy has seen it.
   home_pose: ""
   home_ramp_s: 4
@@ -390,8 +396,8 @@ workflow:
             "${EXTRA[@]}" \
             --action-horizon {{ action_horizon }} \
             --control-hz {{ control_hz }} \
-            --max-episodes {{ max_episodes }} \
-            --episode-timeout-s {{ episode_timeout_s }} \
+            --run-duration-s {{ run_duration_s }} \
+            --interval-s {{ interval_s }} \
             --lang-instruction "{{ lang_instruction }}" \
             --output-dir {{output}} 2>&1 | tee {{output}}/hil_eval.log
 

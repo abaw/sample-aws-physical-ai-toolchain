@@ -241,7 +241,7 @@ to save you from this one.
 
 ### Rehearse in this order
 
-Each rung proves something the next one depends on, and only the last can move the arm.
+Each step proves something the next one depends on, and only the last can move the arm.
 
 1. **Stage 03 on this exact checkpoint.** Do not skip it. An under-trained policy looks like a
    miswired one on hardware.
@@ -252,34 +252,36 @@ Each rung proves something the next one depends on, and only the last can move t
    servo bus. Every write path in the client is gated behind this flag.
 3. **Read `results.json` from that run.** In particular `warmup_actions_outside_envelope` and
    `clipped_by_joint`: if the policy is asking for poses the arm cannot reach, find out here.
-4. **One episode, powered, workspace clear, hand on the power.** `max_episodes=1`, a short
-   `episode_timeout_s`, and stay next to it.
+4. **Powered, briefly, workspace clear, hand on the power.** A small `run_duration_s`, and
+   stay next to it.
 
 ```bash
-# rung 2 — cannot move the arm
+# step 2 — cannot move the arm
 osmo workflow submit 003-workflows/so101-vla/04_hil_eval.yaml \
   --set storage_url=$B \
         checkpoint_url=$B/checkpoints/gr00t-n17/<workflow-id>/checkpoint-<step>/ \
         lang_instruction="<the text your dataset was annotated with>" \
-        no_motion=true max_episodes=1 episode_timeout_s=20
+        no_motion=true run_duration_s=20
 ```
 
-Drop `no_motion=true` for rung 4. Nothing else needs to change.
+Drop `no_motion=true` for step 4. Nothing else needs to change.
 
-### Aborting and scoring, from outside the container
-
-A container has no keyboard, so the client watches for sentinel files and `osmo workflow exec` can
-reach in and create them:
+### Stopping a run early
 
 ```bash
-osmo workflow exec <workflow-id> robot-client -- touch /tmp/hil-control/abort
-osmo workflow exec <workflow-id> robot-client -- touch /tmp/hil-control/success
+osmo workflow cancel <workflow-id>
 ```
 
-`abort` halts after the current step, returns the arm and releases it. `success` and `fail` end the
-current episode with that verdict — **success is operator-scored, because there is no sensor for
-"the cube is on the plate"**. An episode that simply runs out of time is recorded as `timeout` with
-`success: null`, which is honest rather than a guess.
+Cancelling sends SIGTERM, which the client catches and treats as an abort: the arm stops taking new
+commands, ramps back to the pose the interval started from, waits until it arrives, and only then
+drops torque. It unwinds through the same path a timeout does. Your power switch is faster but the
+arm goes limp wherever it is and falls under gravity, so it is the emergency stop, not the routine
+one.
+
+**Nothing is scored.** There is no sensor for "the cube is on the plate", and this workflow does not
+ask you to supply one — you are at the bench watching, which is where that judgement belongs. What
+`results.json` records is the part you cannot see: timing, reach, and heat. See
+[Reading `results.json`](#reading-resultsjson).
 
 ### The latency budget: measure it on your own link, and read this first
 
@@ -331,16 +333,16 @@ Consequences, in order of how much they actually buy:
 evaluated at, or you are driving hardware with a model configuration you never scored.
 
 **Set the receive timeout from your own measurement.** It must sit above your round-trip p99 or
-episodes abort on healthy jitter — at `policy_timeout_ms: 1000` one request in fifty timed out and
+the run aborts on healthy jitter — at `policy_timeout_ms: 1000` one request in fifty timed out and
 was retried, which is why the default is 1500. Its real purpose is the arithmetic: the arm can hold a
 stale pose for at most `(policy_retries + 1) × policy_timeout_ms`, so the defaults bound it at 3 s.
 Upstream's client defaults to 15 s, which at this loop's round trip is not a timeout but an outage. On
-a timeout the arm **holds**, the request is retried, and when the retries run out the episode aborts
+a timeout the arm **holds**, the request is retried, and when the retries run out the run aborts
 and the arm is returned and released — hold, retry, then release. Holding briefly is right; going limp
 on one dropped packet is worse, because the arm falls under gravity and drops whatever it is holding.
 
 Run a `no_motion` rehearsal, read `chunk_latency` out of `results.json`, and set `action_horizon` and
-`policy_timeout_ms` from *those* numbers before a powered episode.
+`policy_timeout_ms` from *those* numbers before a powered run.
 
 ### Where the policy runs
 
@@ -593,25 +595,25 @@ discards commanded travel and should be enabled for a reason you have measured.
 A servo protection fault takes the arm out of software's hands, which is the one failure mode
 nothing here can intervene in — see the note below on what is actually known about it. So the client reads `Present_Temperature` once per re-plan and,
 at `max_servo_temp_c`, **rests rather than ending the run**: the arm returns to where the
-episode began, torque comes off, and it waits until every servo is back under
-`resume_servo_temp_c` before re-attempting the episode.
+interval began, torque comes off, and it waits until every servo is back under
+`resume_servo_temp_c` before driving again.
 
 Three details that matter:
 
 - **Torque must come off to cool.** A servo holding a pose against gravity keeps drawing
   current, so a rest that merely stopped sending actions would not cool anything. The arm is
   limp for the duration.
-- **A rest re-attempts the episode rather than consuming it**, so `max_episodes` counts real
-  attempts and a hot arm costs wall clock, not coverage. Budget `exec_timeout` accordingly —
-  roughly a minute per rest from 55 °C to 45 °C with torque off.
+- **Resting is not driving**, so `run_duration_s` still buys the driving time you asked for and
+  a hot arm costs wall clock instead. Budget `exec_timeout` accordingly — roughly a minute per
+  rest from 55 °C to 45 °C with torque off.
 - **`resume_servo_temp_c` is well below `max_servo_temp_c` on purpose.** Resuming the moment
   the ceiling cleared would stop and start every few seconds; the gap is what makes a rest a
   rest.
 
 `max_cooldowns` bounds it, so an arm that cannot sustain the duty cycle stops instead of
-cycling forever. Measured with the deadband on, three 60 s episodes peaked at 53 °C and
-recovered between episodes rather than accumulating — against 60 °C and climbing in two
-episodes without it.
+cycling forever. Measured with the deadband on, three 60 s intervals peaked at 53 °C and
+recovered between intervals rather than accumulating — against 60 °C and climbing in two
+intervals without it.
 
 **Do not raise `max_servo_temp_c` to make a run finish.** The headroom to the servos' own
 limit is what turns a thermal stop into a controlled return rather than a protection fault
@@ -637,7 +639,7 @@ joints, so the vendor configuration treats the gripper as the joint to protect.
 
 ### Reading `results.json`
 
-Beyond the per-episode records:
+Beyond the per-interval records:
 
 | Field | Read it for |
 |---|---|
@@ -653,7 +655,7 @@ Beyond the per-episode records:
 | `held_by_deadband` | Per joint, how many commands the deadband suppressed as dither |
 | `max_temp_c`, `hottest_temps` | Hottest reading seen, and the per-joint readings at that moment — the maximum alone does not say where the heat is, and on this arm it has been one joint at a time |
 | `rests`, `rested_s` | How often the run stopped to cool, and for how long in total |
-| `attempt` (per episode) | Higher than `episode` where a thermal rest forced a re-attempt |
+| `ended` (per interval) | Why that interval stopped: `elapsed`, `cooldown` or `aborted`. Not a verdict on the policy |
 
 That last one matters more than it looks. **This arm does not reach what it is told**, and unevenly:
 one joint achieved 86% of its commanded amplitude and another only 48%, and the elbow descends more
@@ -712,11 +714,11 @@ scales a node group up or down for you.
 | 02 fine-tune | Validated at 10,000 steps | Loss 1.141 → 0.018 in 5 h 52 m; all five retained checkpoints verified against their manifests |
 | 03 open-loop eval | Validated | Against 10-step, 6,000-step and 10,000-step checkpoints — the error metric separates them by two orders of magnitude. **It does not measure smoothness**, which is why that is now reported separately |
 | 04 HIL, `no_motion` rehearsal | Validated on real hardware | Both tasks gang-scheduled, the client resolved the policy task's host and connected, EEPROM matched the recording calibration, unit conversion agreed with LeRobot on all six joints, both cameras opened at the dataset's resolution, and the loop ran 29 replans over 30 s with zero writes to the servo bus |
-| 04 HIL, powered episode | Validated on real hardware | One 15 s episode at capped speed: torque engaged holding the present pose, the policy drove the arm closed-loop for 254 steps over 16 replans at 16.9 Hz, the arm returned to within 1 deg of its start pose on every joint, and torque was released and verified off on all six |
+| 04 HIL, powered run | Validated on real hardware | One 15 s interval at capped speed: torque engaged holding the present pose, the policy drove the arm closed-loop for 254 steps over 16 replans at 16.9 Hz, the arm returned to within 1 deg of its start pose on every joint, and torque was released and verified off on all six |
 | 04 HIL, `policy_placement=with_robot` | **Not validated, and cannot be here** | Needs a GPU on the arm machine, which the reference hardware does not have |
 | 04 HIL, 30 Hz closed loop | **Not reachable over this WAN** | 15.2 Hz at the default horizon. Not payload-bound and not inference-bound — see the latency section |
-| 04 HIL, sustained multi-episode run | **Not yet achieved** | A 20-episode attempt aborted 2 minutes in on gripper temperature, before the deadband existed. The abort worked as designed and the servo cooled with no damage; the run has not been repeated since |
-| Task success | **Unmeasured** | No episode has been scored. There is no sensor for it — success is the operator's verdict, recorded through the control directory |
+| 04 HIL, sustained run | **Not yet achieved** | A 20-interval attempt aborted 2 minutes in on gripper temperature, before the deadband existed. The abort worked as designed and the servo cooled with no damage; the run has not been repeated since |
+| Task success | **Not measured, by design** | Whether the policy does the task is judged at the bench by the person watching it. Nothing in this workflow records a verdict, because a number here would look like a measurement and there is no sensor behind it |
 
 A reader with no robot gets the complete pipeline through stage 03. That is deliberate.
 
@@ -743,7 +745,7 @@ image, so the commit it pins is changed in one place. That file is injected by e
 | Stage 04: the client sits at "still waiting for the policy server" and eventually aborts | The server task is still downloading the checkpoint, still loading the model — or it failed. The group is gang-scheduled, so both start together | Read the **policy-server** task's own logs. `policy_wait_s` in `results.json` records how long it took |
 | Stage 04 server dies with `Could not load this library: libtorchcodec_core*.so` | `install_n17.sh` verifies its toolchain by importing torchcodec, which needs ffmpeg — even though serving a policy decodes no video | `apt-get install ffmpeg` in the task, as every other stage does |
 | A servo appears to get hot fast while the others stay cool | Almost certainly bus corruption, not heat. Measured heating on this arm is ~0.25 °C/min, so a jump of tens of degrees in minutes is not physical | Check `temperatures.jsonl` for whether the value was sustained or a lone spike, and `bad_temp_reads` for how often the bus is lying |
-| Stage 04 stops with "reached the N-rest limit" | The arm cannot sustain this duty cycle | Shorten `episode_timeout_s`, widen the deadband, or lower `speed`. Raising `max_cooldowns` only makes it cycle longer |
+| Stage 04 stops with "reached the N-rest limit" | The arm cannot sustain this duty cycle | Shorten `interval_s`, widen the deadband, or lower `speed`. Raising `max_cooldowns` only makes it cycle longer |
 | Stage 04 rests repeatedly with implausible temperatures, and `rested_s` is near zero | Corrupted serial reads, not hot servos. A rest that ends instantly is the tell — the re-read came back normal | Already guarded: readings above 90 °C are discarded and a rest needs `temp_confirm_reads` consecutive confirmations. `bad_temp_reads` counts the rejects |
 | Stage 04 stops with "servos did not cool within" | Something is still drawing current with torque off | Check the arm is not resting against a hard stop or holding an object under load |
 | Stage 03 warns about direction reversals | The checkpoint's chunks are jittery. MSE and MAE cannot see this | Drive stage 04 with the deadband set. Raising `denoising_steps` does not help — measured flat from 4 to 32 |
@@ -752,7 +754,7 @@ image, so the commit it pins is changed in one place. That file is injected by e
 | A stage 04 server-side error appears in the client log as one line with no server traceback | The server prints a traceback and keeps serving, so its stdout is a pipe that stays open and block-buffers | Fixed: the server runs under `python -u`. Anything older needs `PYTHONUNBUFFERED=1` |
 | Stage 04 aborts with "did not answer within N ms" on a healthy network | `policy_timeout_ms` is below your round-trip p99 | Read `chunk_latency` from a `no_motion` run and set the timeout above its p99 |
 | Stage 04 refuses to start: "the servos' EEPROM does not match the calibration file" | The arm has been recalibrated since the dataset was recorded, so the policy's joint frame is not this arm's | Find the original calibration. Recalibrating does not fix it — a fresh calibration is a *different* joint space |
-| Stage 04 warns that the resting pose is outside the safety envelope | The arm is resting past where it was calibrated to sweep | Harmless — the first actions are clamped — but move the arm into the workspace the episodes covered, or the policy is extrapolating from a pose it never saw |
+| Stage 04 warns that the resting pose is outside the safety envelope | The arm is resting past where it was calibrated to sweep | Harmless — the first actions are clamped — but move the arm into the workspace the recording covered, or the policy is extrapolating from a pose it never saw |
 | Stage 04 fails with `Failed to write 'Lock' ... There is no status packet!` | A transient servo-bus failure. It has been seen inside LeRobot's `configure()`, whose `torque_disabled()` context re-enables torque from a `finally` — so a failure there can leave torque on | The client retries the engage and forces torque off between attempts. If it persists, check the arm's supply: the symptom is consistent with a servo browning out and rebooting |
 | Stage 04 ends with the arm limp but not where it started | The return ramp finished sending goals before the arm arrived | Raise `release_settle_s`. `return_residual` in `results.json` is how far short it stopped |
 | `results.json` says `torque_released: false` | Software could not confirm the servos are de-energised | **Cut power to the arm.** Then read `final_torque_state` to see which joints |

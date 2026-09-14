@@ -68,11 +68,11 @@ class Abort(Exception):
 
 
 class Cooldown(Exception):
-    """Raised to end an episode early so the servos can rest, without ending the run.
+    """Raised to end an interval early so the servos can rest, without ending the run.
 
     Distinct from ``Abort`` because it is not a fault: it unwinds the same way, returning
     the arm and dropping torque, but the caller then waits for the servos to cool and
-    re-attempts the episode instead of giving up.
+    starts a fresh interval instead of giving up.
     """
 
 
@@ -229,7 +229,7 @@ class ArmDriver:
     * **Every commanded value is clamped** to the calibrated range less a margin, and to
       a per-step delta from where the arm actually is — the latter by LeRobot's
       ``max_relative_target``, which re-reads the present position on every send.
-    * **Release happens on every exit path** — return to the pose the episode started
+    * **Release happens on every exit path** — return to the pose the interval started
       from, then drop torque — and it does not go through any of LeRobot's
       ``@check_if_not_connected`` methods, because a camera that dropped out would
       otherwise make the release itself raise and leave the arm energised.
@@ -586,7 +586,7 @@ class ArmDriver:
             return
         try:
             if self.engaged and home is not None:
-                print("returning to the pose the episode started from...", flush=True)
+                print("returning to the pose the interval started from...", flush=True)
                 self.ramp_to(home, seconds)
                 residual = self.settle(home, self.settle_timeout_s)
                 self.return_residual = residual
@@ -660,7 +660,7 @@ class PolicyLink:
     retried. Holding is the right immediate answer to one dropped chunk: the arm is at a
     pose the policy chose, and it is not moving. Going limp on a single lost packet is
     worse — the arm falls under gravity and drops whatever it is holding. But holding is
-    only correct *briefly*, so when the retries are exhausted the episode aborts and the
+    only correct *briefly*, so when the retries are exhausted the run aborts and the
     arm is returned and released. The timeout behaviour is therefore: hold, retry, then
     release.
     """
@@ -824,82 +824,50 @@ class PolicyLink:
 
 
 # ---------------------------------------------------------------------------
-# Operator control
+# Intervals
 # ---------------------------------------------------------------------------
 
 
-class ControlDir:
-    """Sentinel files a human can touch, since a container has no keyboard.
+def run_interval(index, seconds, arm, policy, rate, args, trace, records) -> None:
+    """Drive for ``seconds``, append the interval's record, and never leave the arm moving.
 
-    The simulation harness this loop is modelled on resets an episode on a keypress. On
-    real hardware the equivalent has to be reachable from outside the container, and it
-    is: ``osmo workflow exec`` rides the same API-server-to-kubelet path the logs do.
-    """
-
-    NAMES = ("abort", "success", "fail")
-
-    def __init__(self, path: pathlib.Path):
-        self.path = path
-        self.path.mkdir(parents=True, exist_ok=True)
-        for name in self.NAMES:
-            (self.path / name).unlink(missing_ok=True)
-
-    def take(self) -> str | None:
-        for name in self.NAMES:
-            marker = self.path / name
-            if marker.exists():
-                marker.unlink(missing_ok=True)
-                return name
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Episodes
-# ---------------------------------------------------------------------------
-
-
-def run_episode(index, attempt, arm, policy, control, rate, args, trace, records) -> None:
-    """Run one episode, append its record, and never leave the arm moving.
+    An interval is not a trial and carries no verdict. It is a bounded stretch of
+    torque-on driving that ends with the arm back at the pose it began from and limp,
+    which is what makes it the unit worth having: the servos only cool while torque is
+    off, and the policy expects to start near the pose it was trained from.
 
     The record is appended in a ``finally`` rather than returned, so an abort halfway
-    through an episode still publishes what happened up to that point — which is the
-    interesting part when something went wrong.
+    through still publishes what happened up to that point — which is the interesting
+    part when something went wrong.
     """
     start_pose = arm.present()
     state = {
-        "outcome": "completed", "success": None, "note": "",
+        "ended": "completed", "note": "",
         "steps": 0, "replans": 0, "max_temp_c": 0, "hottest_temps": {},
     }
     # Commanded-versus-achieved, sampled once per chunk. This arm does not reach what it
     # is told — unevenly, per joint — so the gap is a first-class result, not a detail.
     achieved_gap: dict[str, list[float]] = {j: [] for j in JOINTS}
-    episode_start = time.perf_counter()
+    interval_start = time.perf_counter()
 
     try:
         if args.home_pose:
-            print(f"episode {index}: ramping to the home pose over {args.home_ramp_s}s", flush=True)
+            print(f"interval {index}: ramping to the home pose over {args.home_ramp_s}s", flush=True)
             arm.ramp_to(args.home_pose, args.home_ramp_s)
 
         rate.reset()
         while True:
             if _stop.is_set():
                 raise Abort("stop requested")
-            marker = control.take()
-            if marker == "abort":
-                raise Abort("operator touched the abort file")
-            if marker in ("success", "fail"):
-                state["outcome"] = "scored"
-                state["success"] = marker == "success"
-                break
-            if (time.perf_counter() - episode_start) >= args.episode_timeout_s:
-                state["outcome"] = "timeout"
+            if (time.perf_counter() - interval_start) >= seconds:
+                state["ended"] = "elapsed"
                 break
 
             # Once per re-plan, which is cheap next to a round trip. A servo that reaches
             # its own Max_Temperature_Limit cuts its torque and drops the arm wherever it
             # is; aborting here trades that for a controlled return while the arm is still
             # holding. Joints carrying gravity load heat fastest, so this is what bounds a
-            # long unattended session rather than the episode count.
+            # long session rather than the clock.
             temps = arm.temperatures()
             if not temps:
                 # Every joint's reading was rejected: the bus is unhealthy, not the arm hot.
@@ -952,9 +920,9 @@ def run_episode(index, attempt, arm, policy, control, rate, args, trace, records
                     trace.write(
                         json.dumps(
                             {
-                                "episode": index,
+                                "interval": index,
                                 "step": state["steps"],
-                                "t": round(time.perf_counter() - episode_start, 4),
+                                "t": round(time.perf_counter() - interval_start, 4),
                                 "requested": {j: round(v, 3) for j, v in target.items()},
                                 "sent": {j: round(v, 3) for j, v in last_sent.items()},
                             }
@@ -964,32 +932,30 @@ def run_episode(index, attempt, arm, policy, control, rate, args, trace, records
                 rate.sleep()
                 if _stop.is_set():
                     raise Abort("stop requested")
-                if (time.perf_counter() - episode_start) >= args.episode_timeout_s:
-                    state["outcome"] = "timeout"
+                if (time.perf_counter() - interval_start) >= seconds:
+                    state["ended"] = "elapsed"
                     break
 
             if last_sent is not None and not arm.no_motion:
                 reached = arm.present()
                 for joint in JOINTS:
                     achieved_gap[joint].append(reached[joint] - last_sent[joint])
-            if state["outcome"] == "timeout":
+            if state["ended"] == "elapsed":
                 break
     except Cooldown as exc:
-        state["outcome"] = "cooldown"
+        state["ended"] = "cooldown"
         state["note"] = str(exc)
         raise
     except Abort as exc:
-        state["outcome"] = "aborted"
+        state["ended"] = "aborted"
         state["note"] = str(exc)
         raise
     finally:
-        duration = time.perf_counter() - episode_start
+        duration = time.perf_counter() - interval_start
         records.append(
             {
-                "episode": index,
-                "attempt": attempt,
-                "outcome": state["outcome"],
-                "success": state["success"],
+                "interval": index,
+                "ended": state["ended"],
                 "note": state["note"],
                 "duration_s": round(duration, 2),
                 "steps": state["steps"],
@@ -1003,7 +969,7 @@ def run_episode(index, attempt, arm, policy, control, rate, args, trace, records
                 },
             }
         )
-        # Return to where this episode began, then release, whatever happened.
+        # Return to where this interval began, then release, whatever happened.
         arm.release(start_pose, args.release_ramp_s)
 
 
@@ -1169,23 +1135,36 @@ def build_parser() -> argparse.ArgumentParser:
         "fast it can get there.",
     )
 
-    g = p.add_argument_group("episodes")
+    g = p.add_argument_group("the control loop")
     g.add_argument("--lang-instruction", required=True)
     g.add_argument("--action-horizon", type=int, default=8)
     g.add_argument("--control-hz", type=float, default=30.0)
-    g.add_argument("--max-episodes", type=int, default=1)
-    g.add_argument("--episode-timeout-s", type=float, default=60.0)
+    g.add_argument(
+        "--run-duration-s",
+        type=float,
+        default=20.0,
+        help="How long to drive the arm in total. The only knob for run length.",
+    )
+    g.add_argument(
+        "--interval-s",
+        type=float,
+        default=60.0,
+        help="How long the arm drives before returning to its starting pose and "
+        "releasing torque, then starting again. Sets how often the servos get to cool "
+        "and how often you get a limp arm to re-stage the scene with; it does not "
+        "change how long the run lasts.",
+    )
     g.add_argument(
         "--home-pose",
         default=None,
-        help="Six values in JOINTS order. When given, each episode ramps here first, "
-        "which is what makes repeated episodes comparable.",
+        help="Six values in JOINTS order. When given, every interval ramps here first, so "
+        "the policy always starts from the pose it was trained from rather than from "
+        "wherever the last one left off.",
     )
     g.add_argument("--home-ramp-s", type=float, default=4.0)
 
     g = p.add_argument_group("output")
     g.add_argument("--output-dir", required=True)
-    g.add_argument("--control-dir", default="/tmp/hil-control")  # noqa: S108 - task-local
     return p
 
 
@@ -1199,19 +1178,14 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
     from lerobot.motors import MotorCalibration
     from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
+    # A cancelled workflow arrives as SIGTERM, which is the operator's way to stop a run
+    # early: it unwinds through the same return-and-release path a timeout does.
     _install_signal_handlers()
-    control = ControlDir(pathlib.Path(args.control_dir))
-    print(
-        "operator control: touch "
-        + " or ".join(f"{args.control_dir}/{n}" for n in ControlDir.NAMES)
-        + "  (reachable with `osmo workflow exec`)",
-        flush=True,
-    )
 
     records: list[dict] = []
     results = {
         "config": {k: v for k, v in vars(args).items()},
-        "episodes": records,
+        "intervals": records,
     }
     arm = None
     envelope = None
@@ -1424,29 +1398,40 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
                 flush=True,
             )
 
-        # ---- 5. episodes -------------------------------------------------------
+        # ---- 5. the control loop ------------------------------------------------
         policy.close()
         policy.open_for_loop()
         print(f"switching to the control-loop timeout of {args.policy_timeout_ms} ms", flush=True)
 
-        # A thermal stop rests and re-attempts the same episode rather than ending the run.
-        # The episode index only advances when an episode finishes for a reason of its own,
-        # so `max_episodes` counts real attempts and a hot arm costs time, not coverage.
+        # The run is bounded by one number: how long to drive for. Intervals repeat inside
+        # that budget and are not counted, because their number is not a result — they
+        # exist so the arm periodically returns home and goes limp, which is the only time
+        # the servos cool and the only chance to re-stage the scene by hand.
+        #
+        # Time spent resting is not driving time, so a hot arm makes the run last longer in
+        # wall-clock than `run_duration_s` rather than driving for less of it.
         rests: list[dict] = []
         results["rests"] = rests
+        print(
+            f"driving for {args.run_duration_s:g}s in intervals of at most "
+            f"{args.interval_s:g}s",
+            flush=True,
+        )
         with (output / "trace.jsonl").open("w") as trace:
-            index, attempt = 1, 0
-            while index <= args.max_episodes:
-                attempt += 1
+            index, driven = 0, 0.0
+            while driven < args.run_duration_s:
+                index += 1
+                # Never overshoot the budget: the last interval is whatever is left.
+                seconds = min(args.interval_s, args.run_duration_s - driven)
                 arm.engage(args.acceleration, args.speed)
                 try:
-                    run_episode(
-                        index, attempt, arm, policy, control, rate, args, trace, records
-                    )
+                    run_interval(index, seconds, arm, policy, rate, args, trace, records)
                 except Cooldown as exc:
-                    # run_episode's own teardown has already returned the arm and dropped
-                    # torque, which is the precondition for cooling at all.
-                    print(f"episode {index}: {exc}", flush=True)
+                    # run_interval's own teardown has already returned the arm and dropped
+                    # torque, which is the precondition for cooling at all. The driving it
+                    # did before getting hot still counts against the budget.
+                    driven += records[-1]["duration_s"]
+                    print(f"interval {index}: {exc}", flush=True)
                     if len(rests) >= args.max_cooldowns:
                         raise Abort(
                             f"reached the {args.max_cooldowns}-rest limit; the arm cannot "
@@ -1454,16 +1439,17 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
                         ) from exc
                     rests.append(
                         arm.wait_to_cool(args.resume_servo_temp_c, args.cooldown_timeout_s)
-                        | {"episode": index, "attempt": attempt}
+                        | {"interval": index}
                     )
                     continue
+                driven += records[-1]["duration_s"]
                 print(
-                    f"episode {index}: {records[-1]['outcome']} "
+                    f"interval {index}: {records[-1]['ended']} "
                     f"({records[-1]['steps']} steps at {records[-1]['achieved_hz']} Hz, "
-                    f"hottest {records[-1]['max_temp_c']}C)",
+                    f"hottest {records[-1]['max_temp_c']}C, "
+                    f"{driven:.0f}/{args.run_duration_s:g}s driven)",
                     flush=True,
                 )
-                index += 1
 
     except Abort as exc:
         results["aborted"] = str(exc)
@@ -1483,13 +1469,11 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
                 pass
         policy.close()
 
-        scored = [e for e in records if e.get("success") is not None]
-        successes = sum(1 for e in scored if e["success"])
+        # No success field, and no count of anything, by design. Whether the policy did
+        # something useful is the operator's call, made at the bench while it runs; there is
+        # no sensor for it and a number here would only look like one. What belongs here is
+        # what the eye cannot measure: timing, reach, and heat.
         results["summary"] = {
-            "episodes_run": len(records),
-            "episodes_scored": len(scored),
-            "successes": successes,
-            "success_rate": round(successes / len(scored), 3) if scored else None,
             "chunk_latency": _percentiles(policy.latencies_ms),
             "policy_timeouts": policy.timeouts,
             "loop_overruns": rate.overruns,
