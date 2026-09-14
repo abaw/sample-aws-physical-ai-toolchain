@@ -54,11 +54,13 @@ default-values:
   # configuration you never scored.
   denoising_steps: 4
 
-  # How long to drive the arm, in total. The only knob for run length.
+  # How long the evaluation runs, in total. The only knob for run length. It counts the
+  # home ramp at the start of every interval, so an interval shorter than `home_ramp_s`
+  # buys no driving at all.
   run_duration_s: 20
-  # How long the arm drives before returning to its starting pose and releasing torque,
-  # then starting again. This sets how often the servos get to cool and how often you get
-  # a limp arm to re-stage the scene with. It does not change how long the run lasts.
+  # How long each interval lasts before the arm returns to its starting pose and releases
+  # torque, then starts again. This sets how often the servos get to cool and how often you
+  # get a limp arm to re-stage the scene with. It does not change how long the run lasts.
   interval_s: 60
 
   # --- safety ---------------------------------------------------------------

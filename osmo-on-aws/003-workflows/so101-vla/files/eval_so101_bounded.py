@@ -843,17 +843,22 @@ def run_interval(index, seconds, arm, policy, rate, args, trace, records) -> Non
     start_pose = arm.present()
     state = {
         "ended": "completed", "note": "",
-        "steps": 0, "replans": 0, "max_temp_c": 0, "hottest_temps": {},
+        "steps": 0, "replans": 0, "max_temp_c": 0, "hottest_temps": {}, "ramp_s": 0.0,
     }
     # Commanded-versus-achieved, sampled once per chunk. This arm does not reach what it
     # is told — unevenly, per joint — so the gap is a first-class result, not a detail.
     achieved_gap: dict[str, list[float]] = {j: [] for j in JOINTS}
+    # The interval's own clock starts here, before the ramp, so `seconds` bounds the whole
+    # evaluation rather than only the driven part of it.
     interval_start = time.perf_counter()
 
     try:
         if args.home_pose:
             print(f"interval {index}: ramping to the home pose over {args.home_ramp_s}s", flush=True)
             arm.ramp_to(args.home_pose, args.home_ramp_s)
+        # Timed separately so the control rate can be reported over the driven part alone.
+        # Dividing by the whole interval understates it by however long the ramp took.
+        state["ramp_s"] = time.perf_counter() - interval_start
 
         rate.reset()
         while True:
@@ -952,15 +957,20 @@ def run_interval(index, seconds, arm, policy, rate, args, trace, records) -> Non
         raise
     finally:
         duration = time.perf_counter() - interval_start
+        driven = duration - state["ramp_s"]
         records.append(
             {
                 "interval": index,
                 "ended": state["ended"],
                 "note": state["note"],
                 "duration_s": round(duration, 2),
+                "ramp_s": round(state["ramp_s"], 2),
+                "driven_s": round(driven, 2),
                 "steps": state["steps"],
                 "replans": state["replans"],
-                "achieved_hz": round(state["steps"] / duration, 2) if duration > 0 else None,
+                # Over the driven part only. Including the ramp would report a control rate
+                # the loop never ran at.
+                "achieved_hz": round(state["steps"] / driven, 2) if driven > 0 else None,
                 "max_temp_c": state["max_temp_c"],
                 "hottest_temps": state["hottest_temps"],
                 "start_pose": {j: round(v, 3) for j, v in start_pose.items()},
@@ -1143,7 +1153,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--run-duration-s",
         type=float,
         default=20.0,
-        help="How long to drive the arm in total. The only knob for run length.",
+        help="How long the evaluation runs in total, counting the home ramp at the start "
+        "of every interval. The only knob for run length.",
     )
     g.add_argument(
         "--interval-s",
@@ -1403,34 +1414,35 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
         policy.open_for_loop()
         print(f"switching to the control-loop timeout of {args.policy_timeout_ms} ms", flush=True)
 
-        # The run is bounded by one number: how long to drive for. Intervals repeat inside
-        # that budget and are not counted, because their number is not a result — they
-        # exist so the arm periodically returns home and goes limp, which is the only time
-        # the servos cool and the only chance to re-stage the scene by hand.
+        # The run is bounded by one number: how long the evaluation should last. Intervals
+        # repeat inside that budget and are not counted, because their number is not a
+        # result — they exist so the arm periodically returns home and goes limp, which is
+        # the only time the servos cool and the only chance to re-stage the scene by hand.
         #
-        # Time spent resting is not driving time, so a hot arm makes the run last longer in
-        # wall-clock than `run_duration_s` rather than driving for less of it.
+        # The budget counts each interval whole, including its home ramp, because it bounds
+        # how long the evaluation runs rather than how much of that was driving. Resting
+        # does not count, so a hot arm makes the run last longer in wall clock instead.
         rests: list[dict] = []
         results["rests"] = rests
         print(
-            f"driving for {args.run_duration_s:g}s in intervals of at most "
+            f"evaluating for {args.run_duration_s:g}s in intervals of at most "
             f"{args.interval_s:g}s",
             flush=True,
         )
         with (output / "trace.jsonl").open("w") as trace:
-            index, driven = 0, 0.0
-            while driven < args.run_duration_s:
+            index, spent = 0, 0.0
+            while spent < args.run_duration_s:
                 index += 1
                 # Never overshoot the budget: the last interval is whatever is left.
-                seconds = min(args.interval_s, args.run_duration_s - driven)
+                seconds = min(args.interval_s, args.run_duration_s - spent)
                 arm.engage(args.acceleration, args.speed)
                 try:
                     run_interval(index, seconds, arm, policy, rate, args, trace, records)
                 except Cooldown as exc:
                     # run_interval's own teardown has already returned the arm and dropped
-                    # torque, which is the precondition for cooling at all. The driving it
-                    # did before getting hot still counts against the budget.
-                    driven += records[-1]["duration_s"]
+                    # torque, which is the precondition for cooling at all. The time it used
+                    # before getting hot still counts against the budget.
+                    spent += records[-1]["duration_s"]
                     print(f"interval {index}: {exc}", flush=True)
                     if len(rests) >= args.max_cooldowns:
                         raise Abort(
@@ -1442,12 +1454,13 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
                         | {"interval": index}
                     )
                     continue
-                driven += records[-1]["duration_s"]
+                spent += records[-1]["duration_s"]
                 print(
                     f"interval {index}: {records[-1]['ended']} "
-                    f"({records[-1]['steps']} steps at {records[-1]['achieved_hz']} Hz, "
+                    f"({records[-1]['steps']} steps at {records[-1]['achieved_hz']} Hz over "
+                    f"{records[-1]['driven_s']:.0f}s driving, "
                     f"hottest {records[-1]['max_temp_c']}C, "
-                    f"{driven:.0f}/{args.run_duration_s:g}s driven)",
+                    f"{spent:.0f}/{args.run_duration_s:g}s used)",
                     flush=True,
                 )
 

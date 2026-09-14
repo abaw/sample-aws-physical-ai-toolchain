@@ -656,6 +656,8 @@ Beyond the per-interval records:
 | `max_temp_c`, `hottest_temps` | Hottest reading seen, and the per-joint readings at that moment — the maximum alone does not say where the heat is, and on this arm it has been one joint at a time |
 | `rests`, `rested_s` | How often the run stopped to cool, and for how long in total |
 | `ended` (per interval) | Why that interval stopped: `elapsed`, `cooldown` or `aborted`. Not a verdict on the policy |
+| `duration_s`, `ramp_s`, `driven_s` (per interval) | The whole interval, the home ramp at its start, and the difference — the part the policy was actually driving. `run_duration_s` bounds the first of the three |
+| `achieved_hz` (per interval) | Measured over `driven_s` alone, so it is the rate the loop really held. Compare against `control_hz` |
 
 That last one matters more than it looks. **This arm does not reach what it is told**, and unevenly:
 one joint achieved 86% of its commanded amplitude and another only 48%, and the elbow descends more
