@@ -38,6 +38,11 @@ default-values:
   # it. Do not budget exec_timeout from a short run's step rate: start-up dominates and a
   # brief run reports roughly twice the throughput a sustained one achieves.
   steps: 20000
+  # The cosine schedule's decay length. It auto-scales DOWN when `steps` is smaller than
+  # this, so a short run still completes a full cosine — but it does not scale up. Left at
+  # its default while training longer, the learning rate reaches its 2.5e-6 floor here and
+  # stays there for every remaining step. Keep this equal to `steps` for a long run.
+  scheduler_decay_steps: 30000
   save_freq: 5000
   log_freq: 100
   seed: 1000
@@ -49,8 +54,10 @@ default-values:
   # on top of whatever a task requests.
   cpu: 4
   memory: 48Gi
-  # Dataset plus a 7.2 GB model and 15 GB of optimizer state per saved checkpoint. Storage is
-  # a *scheduled* resource: under-request it and kubelet evicts the pod mid-run.
+  # Dataset plus ~22 GB per RETAINED checkpoint (7.2 GB model + 15 GB optimizer state), plus
+  # the model cache. Scale it with `steps / save_freq`: four checkpoints is ~88 GB. Storage is
+  # a *scheduled* resource, so under-requesting it means kubelet evicts the pod mid-run —
+  # which on a 16-hour job is the expensive way to find out.
   storage: 250Gi
   exec_timeout: 8h
 
@@ -150,6 +157,7 @@ workflow:
           --policy.type=pi0_fast \
           --policy.dtype={{ dtype }} \
           --policy.gradient_checkpointing={{ gradient_checkpointing }} \
+          --policy.scheduler_decay_steps={{ scheduler_decay_steps }} \
           --policy.device=cuda \
           --policy.push_to_hub=false \
           --batch_size={{ batch_size }} \
@@ -191,7 +199,10 @@ workflow:
         PY
 
         if [ -d /tmp/train_out ]; then
-          cp -a /tmp/train_out "{{output}}/train_out"
+          # Moved, not copied: each retained checkpoint is ~22 GB (7.2 GB model plus 15 GB
+          # of optimizer state), so copying would double peak disk and a long run with
+          # several checkpoints can then hit the storage request and be evicted mid-training.
+          mv /tmp/train_out "{{output}}/train_out"
           # The uploader logs per-file failures and then reports success anyway, and this task
           # cannot check its own upload — the uploader runs after the container exits.
           python3 - "{{output}}" <<'PY'

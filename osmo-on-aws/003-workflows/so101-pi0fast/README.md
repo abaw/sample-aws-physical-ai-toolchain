@@ -132,11 +132,27 @@ fragmentation, so it is at the edge rather than far past it. Two untried levers:
 **`dtype` is set explicitly to `bfloat16`** because upstream defaults it to `float32`, which roughly
 doubles memory on a 2.6B model. Inheriting that silently is how a run OOMs for no visible reason.
 
-### Budget steps in epochs, not steps
+### Budget in epochs, not steps — steps do not compare across models
 
-At batch 4 one epoch of a 43-episode, 18,744-frame dataset is **4,686 steps**. The default 20,000
-steps is ~4.3 epochs and ~4.2 h. A comparable GR00T run covered ~17 epochs, which here would be
-~80,000 steps and ~16 h. Raise `steps` deliberately and raise `exec_timeout` with it.
+At batch 4 one epoch of a 43-episode, 18,744-frame dataset is **4,686 steps**. Because batch size
+differs between models, the same step count is not the same amount of training:
+
+| | steps | × batch | samples | epochs | wall clock |
+|---|---|---|---|---|---|
+| A comparable GR00T run | 10,000 | 32 | 320,000 | 17.1 | ~6 h |
+| pi0-FAST at 10,000 | 10,000 | 4 | 40,000 | 2.1 | ~2.1 h |
+| pi0-FAST at 30,000 (default decay length) | 30,000 | 4 | 120,000 | 6.4 | ~6.2 h |
+| pi0-FAST at 80,000 (GR00T-equivalent) | 80,000 | 4 | 320,000 | 17.1 | ~16.6 h |
+
+**Keep `scheduler_decay_steps` equal to `steps` on a long run.** The cosine schedule auto-scales
+*down* when `steps` is smaller than it, so a short run still completes a full cosine and logs the
+rescale. It does **not** scale up: left at its 30,000 default while training for 80,000, the learning
+rate reaches its `2.5e-6` floor at step 30,000 and stays there for the remaining 50,000.
+
+**Scale `storage` with the number of retained checkpoints.** Each is ~22 GB — 7.2 GB of model plus
+15 GB of optimizer state — so `steps / save_freq` checkpoints at 80,000 steps and `save_freq=20000`
+is ~88 GB. Under-requesting storage means kubelet evicts the pod mid-run, which on a 16-hour job is
+an expensive way to find out.
 
 **Do not budget `exec_timeout` from a short run's step rate.** A brief run is dominated by start-up
 and reports roughly twice the throughput a sustained one achieves. **A task killed by its timeout
