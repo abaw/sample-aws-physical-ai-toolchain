@@ -14,9 +14,14 @@ model without anyone noticing.
 |---|---|:---:|---|---|
 | 01 | `01_port_dataset.yaml` | none | ~2 min | a v3.0 dataset at a stable prefix |
 | 02 | `02_finetune.yaml` | 1 | ~4.2 h at the default 20k steps | checkpoints, per run |
+| 03 | `03_openloop_eval.yaml` | 1 | ~6 min for 3 trajectories | error and smoothness metrics, per-dimension plots |
 
-Stages 03 (open-loop evaluation) and 04 (hardware-in-the-loop) are **not written yet**. Until they
-are, this example trains a policy and does not evaluate or deploy one.
+Stage 04 (hardware-in-the-loop) is **not written yet**, so this example trains and scores a policy
+but does not deploy one.
+
+**Stage 03 is the point of the exercise.** An under-trained policy, a wrong joint order and missing
+normalisation statistics all look identical on real hardware — an arm that moves wrongly — and stage
+03 separates them for a few GPU-minutes. Treat it as a stop/go gate, not an optional extra.
 
 ## Why stage 01 exists
 
@@ -86,7 +91,16 @@ osmo workflow submit 003-workflows/so101-pi0fast/01_port_dataset.yaml \
 osmo workflow submit 003-workflows/so101-pi0fast/02_finetune.yaml \
   --set storage_url=$B dataset_url=$B/dataset/<a-new-name>/ \
         steps=50 save_freq=50 exec_timeout=1h
+
+# 3. score it before trusting it. Name ONE checkpoint's pretrained_model/ directory:
+#    pointing at a run prefix downloads every checkpoint it retained, at ~22 GB each.
+osmo workflow submit 003-workflows/so101-pi0fast/03_openloop_eval.yaml \
+  --set storage_url=$B dataset_url=$B/dataset/<a-new-name>/ \
+        checkpoint_url=$B/checkpoints/pi0fast/<workflow-id>/train_out/checkpoints/<step>/pretrained_model/ \
+        traj_ids="3 7 11"
 ```
+
+Use several trajectories: one lucky trajectory is not convergence.
 
 Every override goes in a **single** `--set`. Repeating the flag is not additive — only the last group
 applies, and the run proceeds on the placeholder defaults.
@@ -150,6 +164,37 @@ would be no reason to. `torch.compile` showed no benefit here, but it compiled i
 fast for a model this size and suggests the autoregressive decode loop was never traced — read that
 as "no benefit from this approach", not "compilation cannot help".
 
+## Reading `metrics.json`
+
+Check the fields in this order. The first two can invalidate everything below them.
+
+| Field | Read it for |
+|---|---|
+| `complete` | Did every requested trajectory get scored? Out-of-range IDs are skipped with a warning, so without this a typo silently shrinks the sample being averaged. False also exits non-zero |
+| `degenerate_prediction` | **Check before the reversal rate.** True means the policy barely moves a joint, so its zero reversal rate means nothing. An under-trained checkpoint emits the dataset's mean pose whatever it is shown |
+| `mse`, `mae` | Is it roughly right? Averaged over trajectories |
+| `mse_by_dim`, `mae_by_dim` | Which joint is wrong. One bad joint hides inside a good average, and a wrong joint *order* shows up as several bad dimensions at once |
+| `worst_reversals_predicted` vs `..._ground_truth` | Is it smooth? The ground-truth figure is the reference and a check on the metric: teleop recordings of this task score under 1%, so if it does not, the metric or the dataset is wrong rather than the policy |
+| `per_trajectory[].predicted[dim].travel` | How far each joint actually moved, against `ground_truth[dim].travel` |
+| `plots/traj_*.png` | Predicted against ground truth, per dimension. The numbers are the gate; the plots show *where* it went wrong |
+
+### Why smoothness gets its own metric
+
+MSE cannot see jitter. A zero-mean oscillation on a broadly correct trajectory scores well and cooks
+the smallest servo. The GR00T pipeline learned this from a hardware run that aborted on gripper
+temperature while its MSE gate was satisfied: predicted chunks were reversing direction on 43-61% of
+steps where the recordings they imitate reverse on under 1%.
+
+The reversal metric here is the same definition that pipeline uses, so the two models' numbers are
+directly comparable — which is the reason for running a second model at all. For calibration: a clean
+monotonic ramp scores 0, a random walk 50%, uncorrelated noise 67%. Above `warn_reversals` (0.25 by
+default) the stage warns.
+
+**But zero is ambiguous**, which is why `degenerate_prediction` exists: a constant output and a
+perfectly smooth sweep both score 0 reversals. The flag compares predicted travel against the ground
+truth's own travel per dimension, rather than against an absolute threshold, since what counts as
+"barely moving" depends on the task.
+
 ## Validation status
 
 Honest per stage, as of 2026-09-16:
@@ -161,7 +206,9 @@ Honest per stage, as of 2026-09-16:
 | Stage 02 refuses a v2.1 input | Validated | fails in ~1 min naming stage 01, rather than dying inside LeRobot's loader |
 | Stage 02 trains and publishes a checkpoint | Validated at 50 steps | peak 39.71 GB, 0.743 s/step — reproduces the sizing table above |
 | Stage 02 at the default 20,000 steps | **Not yet run** | the 4.2 h figure is extrapolated from the measured step time, not observed |
-| Policy quality | **Unmeasured** | no open-loop evaluation stage exists yet, and no checkpoint has driven hardware |
+| Stage 03 scores a checkpoint and writes metrics and plots | Validated | 3 trajectories against a 50-step checkpoint; ground-truth reversal rate 1.57%, which agrees with the sub-1% expected of teleop data |
+| Stage 03's guards fire | Validated | an out-of-range trajectory ID gives `complete: false` and a non-zero exit; the 50-step checkpoint's constant output is caught as `degenerate_prediction` on 12 trajectory/dimension pairs |
+| Policy quality | **Unmeasured** | the only checkpoint scored so far had seen 0.01 epochs and predicts a fixed pose. Judging the policy needs the full run |
 
 ## Troubleshooting
 
@@ -174,6 +221,8 @@ Honest per stage, as of 2026-09-16:
 | `torchcodec ... cannot be loaded. Falling back to 'pyav'` | no `ffmpeg` in the image, so `libtorchcodec_core*.so` cannot link | already handled — both stages install `ffmpeg`. Left unfixed it trains on a different decode path than evaluation uses |
 | `FileExistsError: Output directory ... already exists` | `lerobot-train` refuses a pre-existing output dir unless resuming | already handled — the dir is removed, not created |
 | `ModuleNotFoundError` naming `lerobot[pi]` | that extra does not exist at v0.6.1, though `require_package` names it | install `transformers-dep,scipy-dep,dataset,training` — see `files/pi0fast/install_pi0fast.sh` |
+| Stage 03 exits non-zero with "requested trajectory/ies never scored" | a `traj_ids` value the dataset does not have | fix the IDs; the dataset's episode count is in the message |
+| Stage 03 reports `degenerate_prediction: true` | the policy emits a near-constant pose — normal for an under-trained checkpoint | train longer before reading any other metric |
 | `torch.OutOfMemoryError` at batch ≥ 6 | 22 GB of weights plus optimizer state on a 44.39 GiB card | keep batch 4, or try gradient checkpointing |
 
 ## Pinning
