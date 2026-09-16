@@ -15,9 +15,10 @@ model without anyone noticing.
 | 01 | `01_port_dataset.yaml` | none | ~2 min | a v3.0 dataset at a stable prefix |
 | 02 | `02_finetune.yaml` | 1 | ~4.2 h at the default 20k steps | checkpoints, per run |
 | 03 | `03_openloop_eval.yaml` | 1 | ~6 min for 3 trajectories | error and smoothness metrics, per-dimension plots |
+| 04 | `04_hil_eval.yaml` | 1 | ~4 min, most of it loading the checkpoint | closed-loop results, trace, latency |
 
-Stage 04 (hardware-in-the-loop) is **not written yet**, so this example trains and scores a policy
-but does not deploy one.
+**Stages 01-03 need no robot** and are a complete cloud pipeline. **Stage 04 needs a physical SO-101
+arm on an EKS Hybrid Node** and is the only stage that moves anything.
 
 **Stage 03 is the point of the exercise.** An under-trained policy, a wrong joint order and missing
 normalisation statistics all look identical on real hardware — an arm that moves wrongly — and stage
@@ -164,6 +165,70 @@ would be no reason to. `torch.compile` showed no benefit here, but it compiled i
 fast for a model this size and suggests the autoregressive decode loop was never traced — read that
 as "no benefit from this approach", not "compilation cannot help".
 
+## Hardware-in-the-loop (stage 04)
+
+**This stage actuates a robot.** A Feetech bus has no watchdog: if the client dies mid-motion the
+servos hold their last goal indefinitely. That is what the temperature headroom, the per-joint clamps
+and a reachable physical e-stop are for. Do not rely on software for this one.
+
+### `no_motion` defaults to TRUE
+
+The arm cannot move unless you pass `no_motion=false` **explicitly**. Omitting the flag leaves
+rehearsal mode on, and a run that looks correct in every other respect simply will not move — check
+`summary.no_motion` in `results.json` before concluding the arm is broken.
+
+### Rehearse in this order
+
+1. **Stage 03 on this exact checkpoint.** An under-trained policy looks like a miswired one on
+   hardware. Check `degenerate_prediction` first.
+2. **`no_motion=true`, arm powered but limp.** Everything runs — both tasks gang-schedule, the client
+   resolves the server's host, the observation passes the server, chunk length is checked, real
+   end-to-end latency is measured — with **zero writes** to the servo bus.
+3. **Read `results.json` from that run**, especially `chunk_latency` and
+   `warmup_actions_outside_envelope`.
+4. **Powered, briefly, workspace clear, hand on the power.** A small `run_duration_s`, and stay next
+   to it.
+
+### The client is shared, not copied
+
+Stage 04 injects `so101-vla/files/eval_so101_bounded.py` by relative path and points it at this
+pipeline's transport with `--transport-module`. Every line of hardware safety — envelope clamping,
+per-step delta limits, temperature confirmation with implausible-slew rejection, the return-and-
+release path, torque read-back — is the same code both pipelines run, not a second copy that can
+drift. The failure mode a copy invites is an energised arm.
+
+Serving is written here because **nothing shipped can serve this checkpoint**: openpi's websocket
+server loads openpi's own checkpoint layout, and LeRobot's `async_inference` policy server lists the
+policies it supports and `pi0_fast` is not among them. So `files/pi0fast/serve_policy.py` speaks the
+contract the client already speaks and adapts it to LeRobot's batch format. The contract is the
+pipeline's interface; each model's server meets it.
+
+### `jitter_deg`, for testing tracking
+
+An under-trained checkpoint emits a constant pose, which proves the transport and the release path
+but not that the arm follows a *changing* command. `jitter_deg` adds bounded uniform noise to every
+action **in the server**, so no motion-generating code enters the safety-critical client and the
+client's own envelope and per-step delta limit bound it exactly as they bound a real policy. Off by
+default, refused above 5°, and reported in every reply so a jittered trace cannot be mistaken for
+policy output.
+
+### Choosing `action_horizon`
+
+A chunk of N actions at `control_hz` buys `N / control_hz` of motion, and the arm pauses at a chunk
+boundary only if the round trip took longer than that. Measured on this deployment:
+
+| | value |
+|---|---|
+| Local inference (stage 04 server) | ~161 ms |
+| Round-trip p50, pod-to-pod | 415-519 ms across runs |
+| Round-trip p99 | 819-968 ms |
+
+Local inference is a *quarter* of the round trip, so the path is **network-bound, not model-bound** —
+GR00T measures 419 ms p50 on the same link with a faster model. At `action_horizon: 16` a chunk buys
+533 ms, which clears the p50 but not the p99, so the arm pauses occasionally. Above ~29 it clears the
+p99 too, at the cost of running open-loop for longer between re-plans. Measure your own link and
+choose from those numbers.
+
 ## Reading `metrics.json`
 
 Check the fields in this order. The first two can invalidate everything below them.
@@ -208,7 +273,9 @@ Honest per stage, as of 2026-09-16:
 | Stage 02 at the default 20,000 steps | **Not yet run** | the 4.2 h figure is extrapolated from the measured step time, not observed |
 | Stage 03 scores a checkpoint and writes metrics and plots | Validated | 3 trajectories against a 50-step checkpoint; ground-truth reversal rate 1.57%, which agrees with the sub-1% expected of teleop data |
 | Stage 03's guards fire | Validated | an out-of-range trajectory ID gives `complete: false` and a non-zero exit; the 50-step checkpoint's constant output is caught as `degenerate_prediction` on 12 trajectory/dimension pairs |
-| Policy quality | **Unmeasured** | the only checkpoint scored so far had seen 0.01 epochs and predicts a fixed pose. Judging the policy needs the full run |
+| Stage 04, no-motion rehearsal | Validated | both tasks gang-scheduled, host token resolved, observation accepted, 22 replans at 16.5 Hz, zero writes to the bus, zero envelope clipping |
+| Stage 04, powered | Validated on real hardware | ±2° jitter, 161 steps over 10.2 s of driving at 15.8 Hz; the arm tracked (gravity-loaded joints undershot ~1.9°, wrist and gripper within 0.2°), returned to within 0.88° of its start pose, peaked at 37 °C, and torque was verified off on all six joints |
+| Policy quality | **Unmeasured** | the only checkpoint that exists has seen 0.01 epochs and predicts a fixed pose. The powered run above proves the plumbing, not the policy. Judging it needs the full training run |
 
 ## Troubleshooting
 
@@ -223,6 +290,9 @@ Honest per stage, as of 2026-09-16:
 | `ModuleNotFoundError` naming `lerobot[pi]` | that extra does not exist at v0.6.1, though `require_package` names it | install `transformers-dep,scipy-dep,dataset,training` — see `files/pi0fast/install_pi0fast.sh` |
 | Stage 03 exits non-zero with "requested trajectory/ies never scored" | a `traj_ids` value the dataset does not have | fix the IDs; the dataset's episode count is in the message |
 | Stage 03 reports `degenerate_prediction: true` | the policy emits a near-constant pose — normal for an under-trained checkpoint | train longer before reading any other metric |
+| Stage 04 completes but the arm never moves | `no_motion` defaults to true and was not overridden | pass `no_motion=false`; confirm with `summary.no_motion` in `results.json` |
+| Stage 04's client dies on the first ping | a transport whose `ping()` raises instead of returning false | the client polls `ping()` bare for up to `policy_wait_s` while the server loads; it must never raise |
+| The arm pauses at chunk boundaries | the round-trip p99 exceeds the motion a chunk buys | raise `action_horizon`, or accept it — the arm holds its last commanded pose, which is safe |
 | `torch.OutOfMemoryError` at batch ≥ 6 | 22 GB of weights plus optimizer state on a 44.39 GiB card | keep batch 4, or try gradient checkpointing |
 
 ## Pinning

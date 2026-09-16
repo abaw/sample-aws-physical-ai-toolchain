@@ -63,6 +63,25 @@ RESOLUTION_MINUS_1 = 4095
 LANGUAGE_KEY = "annotation.human.task_description"
 
 
+# Where the ZMQ transport comes from. Default is the reference implementation this client
+# was built against; a second model can supply its own without a second copy of this file,
+# which matters because everything below `ArmDriver` is hardware-safety code earned on real
+# hardware and must not exist twice. The transport itself is model-agnostic — REQ/REP plus
+# msgpack-numpy with a pickle-safety boundary — so only the import location varies.
+TRANSPORT_MODULE = "gr00t.policy.server_client"
+
+
+def _transport():
+    """Import the transport module named by --transport-module.
+
+    Resolved lazily and through one function, so the client class and the serializer cannot
+    end up coming from different implementations and disagreeing about the wire format.
+    """
+    import importlib
+
+    return importlib.import_module(TRANSPORT_MODULE)
+
+
 class Abort(Exception):
     """Raised to unwind through the release path rather than dying where we stand."""
 
@@ -666,9 +685,7 @@ class PolicyLink:
     """
 
     def __init__(self, host, port, *, loop_timeout_ms, setup_timeout_s, retries):
-        from gr00t.policy.server_client import PolicyClient
-
-        self._client_cls = PolicyClient
+        self._client_cls = _transport().PolicyClient
         self.host, self.port = host, port
         self.loop_timeout_ms = loop_timeout_ms
         self.setup_timeout_ms = int(setup_timeout_s * 1000)
@@ -753,7 +770,7 @@ class PolicyLink:
         compressed frame, and on a lab uplink that transfer, not inference, is what
         dominates the round trip.
         """
-        from gr00t.policy.server_client import MsgSerializer
+        MsgSerializer = _transport().MsgSerializer  # noqa: N806 - upstream's class name
 
         request = {
             "endpoint": "get_action",
@@ -768,7 +785,7 @@ class PolicyLink:
         failures are ones where the wire format loses something — a key decoded as bytes
         instead of str, say, which reads on the server as a key that is simply absent.
         """
-        from gr00t.policy.server_client import MsgSerializer
+        MsgSerializer = _transport().MsgSerializer  # noqa: N806 - upstream's class name
 
         built = self.build_observation(obs, instruction)
         decoded = MsgSerializer.from_bytes(MsgSerializer.to_bytes(built))
@@ -1174,6 +1191,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     g.add_argument("--home-ramp-s", type=float, default=4.0)
 
+    g.add_argument(
+        "--transport-module",
+        default=TRANSPORT_MODULE,
+        help="Importable module providing PolicyClient and MsgSerializer. Defaults to the "
+        "reference implementation; a different policy server can supply its own so this "
+        "client need not be duplicated to serve it.",
+    )
+
     g = p.add_argument_group("output")
     g.add_argument("--output-dir", required=True)
     return p
@@ -1181,6 +1206,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by risk
     args = build_parser().parse_args()
+    global TRANSPORT_MODULE  # noqa: PLW0603 - set once, before anything imports it
+    TRANSPORT_MODULE = args.transport_module
     args.home_pose = _parse_pose(args.home_pose)
     output = pathlib.Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
