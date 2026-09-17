@@ -150,6 +150,11 @@ workflow:
         # DATASET. Model weights still are, which is what HF_TOKEN is for.
         # `--policy.push_to_hub=false` is mandatory: it defaults to true, and validate() then
         # demands a repo_id, which reads as a dataset error and is not one.
+        # The progress bar writes carriage returns, and a tee'd stream keeps them: on a long
+        # run the redraws overwrite almost every metric line, leaving a multi-megabyte log
+        # with a handful of usable ones. Disabling the bar and translating any remaining CR
+        # to newline is what makes the loss curve survive to the artifact.
+        export TQDM_DISABLE=1
         set +e
         lerobot-train \
           --dataset.repo_id="{{ repo_id }}" \
@@ -166,7 +171,7 @@ workflow:
           --log_freq={{ log_freq }} \
           --seed={{ seed }} \
           --output_dir=/tmp/train_out \
-          2>&1 | tee "{{output}}/train.log"
+          2>&1 | tr '\r' '\n' | tee "{{output}}/train.log"
         TRAIN_RC=${PIPESTATUS[0]}
         set -e
         echo "lerobot-train exit code: ${TRAIN_RC}"
@@ -176,9 +181,10 @@ workflow:
         # code is captured rather than allowed to kill the script for the same reason — with
         # `set -e` and a pipe, a non-zero exit would skip the chmod below and the uploader
         # could not read the log explaining the failure.
-        python3 - "{{output}}" "${TRAIN_RC}" <<'PY'
+        python3 - "{{output}}" "${TRAIN_RC}" /tmp/train_out <<'PY'
         import json, pathlib, re, sys
         out = pathlib.Path(sys.argv[1])
+        train_out = pathlib.Path(sys.argv[3])
         log = (out / "train.log").read_text(errors="replace")
         def last(pattern):
             found = re.findall(pattern, log)
@@ -194,6 +200,16 @@ workflow:
             "data_s": last(r"data_s:([0-9.]+)"),
             "steps_logged": last(r"step:([0-9]+)"),
         }
+        # Read from the checkpoint rather than parsed out of a log the progress bar can
+        # mangle. `step` and the final learning rate are the two facts worth being certain
+        # of: the latter confirms the cosine schedule actually completed, which it does not
+        # if scheduler_decay_steps was left below `steps`.
+        states = sorted(train_out.glob("checkpoints/*/training_state/training_step.json"))
+        if states:
+            metrics["checkpoint_step"] = json.loads(states[-1].read_text()).get("step")
+        scheds = sorted(train_out.glob("checkpoints/*/training_state/scheduler_state.json"))
+        if scheds:
+            metrics["final_lr"] = (json.loads(scheds[-1].read_text()).get("_last_lr") or [None])[0]
         (out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
         print(json.dumps(metrics, indent=2))
         PY

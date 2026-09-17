@@ -160,26 +160,44 @@ publishes nothing.**
 
 ## Inference latency, measured
 
-Relevant to stages 03 and 04, and measured on one L40S over 50 timed calls:
+**Decoding is autoregressive, so latency depends on what the policy emits.** This is the single most
+important thing to know about serving pi0-FAST, and it is easy to measure wrongly: an under-trained
+checkpoint emits a near-constant pose, terminates decoding early, and looks fast.
 
-| variant | p50 | actions/call | motion bought at 30 Hz | ratio |
-|---|---|---|---|---|
-| default | **160.7 ms** | 50 | 1,667 ms | **10.4×** |
-| `use_kv_cache=false` | 6,708.7 ms | 50 | 1,667 ms | 0.25× |
-| `torch.compile` | 161.7 ms | 50 | 1,667 ms | 10.3× |
+Measured on one L40S, local inference only:
 
-Inference peak VRAM is **7.31 GB** — no optimizer state needed, so a serving task is far smaller
-than a training one.
+| checkpoint | local p50 | note |
+|---|---|---|
+| under-trained (predicts a constant) | **161 ms** | not representative — measure on a trained one |
+| trained, 17 epochs | **~546 ms** | inferred from an 804 ms round trip less ~257 ms of network |
 
-A chunk of N actions executed at `control_hz` buys `N / control_hz` of motion, and the arm only
-stalls if inference took longer than that. At 10× headroom, **`n_action_steps` becomes a
-control-quality choice rather than a way to hide latency** — executing all 50 means running
-open-loop for 1.67 s, unable to react to a moved object.
+End-to-end on a cloud-GPU-to-on-premise-arm link, at `action_horizon: 16`:
 
-**The KV cache is worth 42×.** It defaults on; never disable it to save memory, and at 7.31 GB there
-would be no reason to. `torch.compile` showed no benefit here, but it compiled in 2.2 s, which is too
-fast for a model this size and suggests the autoregressive decode loop was never traced — read that
-as "no benefit from this approach", not "compilation cannot help".
+| | under-trained ckpt | trained ckpt |
+|---|---|---|
+| Round trip p50 | 415-519 ms | **804 ms** |
+| Round trip p99 | 819-968 ms | **1059 ms** |
+| Motion bought per chunk | 533 ms | 533 ms |
+| Achieved control rate | 15.8 Hz | **11.6-12.8 Hz** |
+
+A chunk of N actions at `control_hz` buys `N / control_hz` of motion, and the arm pauses at a chunk
+boundary if the round trip took longer. **With a trained policy at horizon 16 it pauses at every
+boundary**, moving about 39% of the wall clock. Clearing the p99 needs `action_horizon >= 32`
+(1,067 ms of motion against 1,059 ms), at the cost of running open-loop for 1.07 s between re-plans
+and so being unable to react to a moved object for that long. Measure your own link with a **trained**
+checkpoint and choose from those numbers.
+
+The round trip is also mostly network: ~257 ms of pod-to-pod overhead, and a GR00T pipeline on the
+same link measures 419 ms p50 with a faster model. So co-locating the policy with the robot would
+help more than a faster model would.
+
+Inference peak VRAM is **7.31 GB** — no optimizer state needed, so a serving task is far smaller than
+a training one, which also makes co-location plausible on a modest edge GPU.
+
+**The KV cache is worth 42×** (161 ms with, 6,709 ms without, on the under-trained checkpoint). It
+defaults on; never disable it to save memory, and at 7.31 GB there is no reason to. `torch.compile`
+showed no benefit, but compiled in 2.2 s — too fast for a model this size, suggesting the decode loop
+was never traced. Read that as "no benefit from this approach", not "compilation cannot help".
 
 ## Hardware-in-the-loop (stage 04)
 
@@ -286,12 +304,14 @@ Honest per stage, as of 2026-09-16:
 | Stage 01 leaves the source tree alone | Validated | the GR00T v2.1 tree and its `modality.json` unchanged afterwards |
 | Stage 02 refuses a v2.1 input | Validated | fails in ~1 min naming stage 01, rather than dying inside LeRobot's loader |
 | Stage 02 trains and publishes a checkpoint | Validated at 50 steps | peak 39.71 GB, 0.743 s/step — reproduces the sizing table above |
-| Stage 02 at the default 20,000 steps | **Not yet run** | the 4.2 h figure is extrapolated from the measured step time, not observed |
+| Stage 02 at 80,000 steps (17 epochs) | Validated | 16h55m end to end, 4h14m per 20,000 steps, peak 39.71 GB, 0.749 s/step — reproduces the sizing table. Four checkpoints published; the final learning rate reached its configured floor, confirming the cosine schedule completed |
 | Stage 03 scores a checkpoint and writes metrics and plots | Validated | 3 trajectories against a 50-step checkpoint; ground-truth reversal rate 1.57%, which agrees with the sub-1% expected of teleop data |
 | Stage 03's guards fire | Validated | an out-of-range trajectory ID gives `complete: false` and a non-zero exit; the 50-step checkpoint's constant output is caught as `degenerate_prediction` on 12 trajectory/dimension pairs |
 | Stage 04, no-motion rehearsal | Validated | both tasks gang-scheduled, host token resolved, observation accepted, 22 replans at 16.5 Hz, zero writes to the bus, zero envelope clipping |
 | Stage 04, powered | Validated on real hardware | ±2° jitter, 161 steps over 10.2 s of driving at 15.8 Hz; the arm tracked (gravity-loaded joints undershot ~1.9°, wrist and gripper within 0.2°), returned to within 0.88° of its start pose, peaked at 37 °C, and torque was verified off on all six joints |
-| Policy quality | **Unmeasured** | the only checkpoint that exists has seen 0.01 epochs and predicts a fixed pose. The powered run above proves the plumbing, not the policy. Judging it needs the full training run |
+| Stage 03 on a trained checkpoint | Validated | 80,000 steps: MSE 2.79, MAE 0.70, `degenerate_prediction: false`, worst reversals 11.8% against ground truth's 1.8%. At 20,000 steps: MSE 203.1 — so training length dominates, by 73x |
+| Stage 04 powered with a trained policy | Validated end to end | three 60 s intervals, 150 s of driving, torque verified off on all six joints, returned to 1.14 deg, peak 37 deg C, no thermal rests |
+| **Task performance** | **Poor, and not addressed here** | the policy runs the loop safely and its trajectories score well against recorded ones, but it does not perform the task usefully on real hardware. This example exists to show the pipeline is not shaped around one model; making a policy work is a separate problem. Likely places to look: 43 episodes is under-provisioned (SmolVLA's docs call 25 insufficient and 50 a floor), and `action_horizon` 16 makes the arm pause at every chunk boundary |
 
 ## Troubleshooting
 
@@ -308,7 +328,9 @@ Honest per stage, as of 2026-09-16:
 | Stage 03 reports `degenerate_prediction: true` | the policy emits a near-constant pose — normal for an under-trained checkpoint | train longer before reading any other metric |
 | Stage 04 completes but the arm never moves | `no_motion` defaults to true and was not overridden | pass `no_motion=false`; confirm with `summary.no_motion` in `results.json` |
 | Stage 04's client dies on the first ping | a transport whose `ping()` raises instead of returning false | the client polls `ping()` bare for up to `policy_wait_s` while the server loads; it must never raise |
-| The arm pauses at chunk boundaries | the round-trip p99 exceeds the motion a chunk buys | raise `action_horizon`, or accept it — the arm holds its last commanded pose, which is safe |
+| The arm pauses at chunk boundaries | the round-trip p99 exceeds the motion a chunk buys | raise `action_horizon` to at least `p99_ms x control_hz / 1000`, or accept it — the arm holds its last commanded pose, which is safe |
+| Inference is much slower than a latency probe suggested | decoding is autoregressive, so a checkpoint that emits a near-constant pose terminates early and measures ~3x fast | re-measure with a trained checkpoint before choosing `action_horizon` |
+| Stage 04 clips the gripper on a trained policy | the policy asks to close past `gripper_margin` | widen `gripper_margin` if your recording used more travel than the margin leaves |
 | `torch.OutOfMemoryError` at batch ≥ 6 | 22 GB of weights plus optimizer state on a 44.39 GiB card | keep batch 4, or try gradient checkpointing |
 
 ## Pinning
