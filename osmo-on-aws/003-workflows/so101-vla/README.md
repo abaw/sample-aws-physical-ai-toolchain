@@ -733,6 +733,27 @@ GR00T's own launcher and evaluator, so a different model means different workflo
 The GR00T toolchain is installed at run time by `files/gr00t/install_n17.sh` rather than baked into an
 image, so the commit it pins is changed in one place. That file is injected by every stage.
 
+### A second model exists, and what it cost
+
+[`so101-pi0fast/`](../so101-pi0fast/README.md) runs pi0-FAST on the same arm and the same recordings,
+as a sibling pipeline rather than a `model=` branch here. It was built to find out which parts of
+*this* pipeline were shaped around GR00T without anyone noticing. Measured, in order of cost:
+
+| Seam | Cost of adding a second model | Why |
+|---|---|---|
+| **Dataset** | highest — a whole extra stage | GR00T wants LeRobot v2 plus `meta/modality.json`; LeRobot's own training reads v3 only and refuses older. Neither can read the other's tree, and a v2.1 tree written by GR00T tooling is missing a per-episode statistics file the v3 converter demands |
+| **Serving** | high — ~380 lines | no shipped policy server loads a LeRobot-trained checkpoint of that policy, so transport and server were written |
+| Training | moderate | a different entry point, plus several non-obvious install requirements |
+| **Robot client** | near zero | see below |
+
+**`files/eval_so101_bounded.py` is now shared with that pipeline.** It is injected there by relative
+path, so **editing it changes both**. The only accommodation it needed was `--transport-module`, which
+names the module providing `PolicyClient` and `MsgSerializer` and defaults to GR00T's — so this
+pipeline is unaffected. It was done that way rather than by copying because everything below
+`ArmDriver` is hardware safety earned on this arm, and a second copy that drifts fails by leaving the
+arm energised. If you change the release path, the envelope, or the temperature logic, you are
+changing it for both pipelines, which is the point.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

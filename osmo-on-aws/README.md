@@ -265,7 +265,7 @@ For more details on profile configuration, see the [OSMO Setup Profile documenta
 | `cosmos_transfer_augmentation.yaml` | L40S | Prompt-driven video augmentation with Cosmos Transfer2.5 |
 | `pick_and_place_training.yaml` | Multi-GPU | Reference skeleton for a full pick-and-place pipeline |
 | [`so101-vla/`](003-workflows/so101-vla/README.md) | 1× L40S | **Multi-stage example** — fine-tune a VLA model on SO-101 recordings, evaluate it offline, then close the loop on a real arm |
-| [`so101-pi0fast/`](003-workflows/so101-pi0fast/README.md) | 1× L40S | **A second VLA on the same arm** — pi0-FAST through LeRobot, for comparison with the GR00T pipeline. Training only so far |
+| [`so101-pi0fast/`](003-workflows/so101-pi0fast/README.md) | 1× L40S | **A second VLA on the same arm** — pi0-FAST through LeRobot, as a check that these stages are not shaped around one model |
 
 The single-file workflows above are each self-contained. `so101-vla/` is a four-stage pipeline —
 prepare a dataset, fine-tune GR00T N1.7, evaluate the checkpoint offline, then drive a physical SO-101
@@ -273,11 +273,16 @@ arm with it — and has its own [README](003-workflows/so101-vla/README.md) cove
 submit order, measured resource requirements, and how to read each result. It needs a Hugging Face
 token credential.
 
-`so101-pi0fast/` trains a **second** model — pi0-FAST — on the same arm and the same recordings, as a
+`so101-pi0fast/` runs a **second** model — pi0-FAST — on the same arm and the same recordings, as a
 check that these stages are not shaped around one model's architecture. It is deliberately a sibling
-rather than an option inside `so101-vla/`: the two need different dataset formats and different
-training entry points, and keeping them separate is what makes the differences visible. It covers
-dataset porting and fine-tuning; evaluation and hardware stages are not written yet.
+rather than an option inside `so101-vla/`: the two need mutually unreadable dataset formats and
+different training entry points, and keeping them separate is what makes the differences visible.
+
+All four of its stages are validated on real hardware, including a powered closed-loop run. Its
+policy does **not** perform the task well, which that README says plainly — the example demonstrates
+that the pipeline is model-agnostic, not that any particular policy works. What it measured is where
+the cost of a second model actually falls: mostly on the dataset stage, then serving, and almost not
+at all on the robot client, which the two pipelines now share.
 
 Its first three stages need no robot and are a complete cloud pipeline on their own. **Stage 04 is the
 only workflow in this repo that physically actuates hardware**: it gang-schedules a policy server on a

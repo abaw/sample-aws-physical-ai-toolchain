@@ -281,7 +281,21 @@ device appears in the container with correct ownership and every open fails, bec
 the container device cgroup blocks it — which reads as a broken device rather than a
 missing permission.
 
-## 10. Detach and re-attach
+## 10. What consumes the node once it is attached
+
+Two workflows in this repo schedule a task here, both as the robot half of a
+gang-scheduled pair whose other half holds a cloud GPU:
+[`so101-vla/04_hil_eval.yaml`](../003-workflows/so101-vla/README.md) and
+[`so101-pi0fast/04_hil_eval.yaml`](../003-workflows/so101-pi0fast/README.md). They share one
+robot client and differ only in the policy server they talk to, so the device paths
+identified in step 9 are set the same way in both — as workflow variables, not baked
+into a script.
+
+Both refuse to move the arm unless told to explicitly. Rehearse with `no_motion=true`
+first; it exercises scheduling, the tunnel, device access and the full control loop
+while performing zero writes to the servo bus.
+
+## 11. Detach and re-attach
 
 Hybrid nodes bill **per vCPU-hour for as long as they are attached**, so remove the
 node between sessions rather than leaving an idle machine joined.
@@ -295,7 +309,7 @@ sudo ./nodeadm uninstall            # also deregisters the SSM managed instance
 Re-onboarding needs a fresh activation if the old one has expired, then steps 5
 onward again.
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 **`nodeadm init` fails node-interface validation.** `--node-ip` is outside the
 cluster's declared `hybrid_node_cidrs`, or is not an address on this machine.
