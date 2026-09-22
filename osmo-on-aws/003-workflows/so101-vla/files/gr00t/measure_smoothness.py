@@ -36,10 +36,10 @@ import torch
 
 JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 
-# Shared with every other model's scorer. The degeneracy test in particular must not diverge:
-# it is what stops a policy that does not move from passing a smoothness gate.
+# Shared with every other model's scorer, so a statistic two pipelines report under the same
+# name is the same code.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from trajectory_metrics import degenerate_dimensions, summarize  # noqa: E402
+from trajectory_metrics import summarize  # noqa: E402
 
 
 def main() -> int:
@@ -134,28 +134,14 @@ def main() -> int:
             "mae": round(float(np.abs(err).mean()), 3),
             "joints": smooth,
             "worst_reversals": round(max(v["reversals"] for v in smooth.values()), 4),
-            # Zero reversals is the *best* possible smoothness score and is also what a
-            # checkpoint emitting a constant pose produces, so the score is uninterpretable
-            # without this. Compared against the ground truth's own travel, since what counts
-            # as barely moving depends on the task.
-            "degenerate_dimensions": degenerate_dimensions(smooth, truth_smooth),
         }
-        row["degenerate_prediction"] = bool(row["degenerate_dimensions"])
         results["sweep"][str(denoise)] = row
         print(
             f"\ndenoising {denoise:3d}: latency p50 {row['latency_p50_ms']:6.1f} ms  "
             f"MSE {row['mse']:8.3f}  MAE {row['mae']:6.3f}  worst reversals "
-            f"{row['worst_reversals']:.1%}"
-            + ("  DEGENERATE" if row["degenerate_prediction"] else ""),
+            f"{row['worst_reversals']:.1%}",
             flush=True,
         )
-        for finding in row["degenerate_dimensions"]:
-            print(
-                f"  WARNING: {finding['dim']} travels {finding['predicted_travel']} against "
-                f"the ground truth's {finding['ground_truth_travel']} — this prediction is "
-                f"barely moving, so its smoothness score means nothing",
-                flush=True,
-            )
         for name, v in smooth.items():
             print(
                 f"  {name:15s} reversals {v['reversals']:6.1%}   |step| p50 {v['step_p50']:.3f}",

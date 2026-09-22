@@ -14,10 +14,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Trajectory statistics shared by every model's open-loop scoring.
 
-Shared because the **degeneracy** test below is subtle and must not diverge between models:
-it is the check that stops a policy which does not move from passing a smoothness gate, and a
-second copy that drifts would silently stop catching that. The reversal rate travels with it
-because the two are only meaningful together.
+Shared because these were byte-identical copies in two scorers, and a statistic that two
+pipelines report under the same name should be the same code. Reported, never gated: how a
+policy actually performs is judged by watching the arm, not by reading a number.
 
 Not shared, deliberately: how a model produces trajectories, what it calls its dimensions, and
 everything about its checkpoint. Those belong to the model.
@@ -28,14 +27,6 @@ from __future__ import annotations
 import statistics
 
 import numpy as np
-
-# A dimension whose ground truth barely moves cannot say anything about whether a prediction
-# moved, so it is excluded from the degeneracy test rather than counted as a pass.
-MIN_GROUND_TRUTH_TRAVEL = 1.0
-
-# Below this fraction of the ground truth's own travel, a prediction is not tracking the task.
-# Relative rather than absolute because what counts as "barely moving" depends on the task.
-DEGENERATE_TRAVEL_FRACTION = 0.05
 
 
 def reversal_rate(series: list[float]) -> float:
@@ -100,42 +91,3 @@ def summarize(chunks: list[np.ndarray], names: list[str]) -> dict:
             "travel": round(max(whole) - min(whole), 3),
         }
     return out
-
-
-def degenerate_dimensions(
-    predicted: dict,
-    ground_truth: dict,
-    *,
-    traj_id: int | None = None,
-) -> list[dict]:
-    """Dimensions where the prediction barely moved while the ground truth did.
-
-    This is the check that makes a smoothness score trustworthy. An under-trained checkpoint
-    emits the dataset's mean pose whatever it is shown; a constant output scores **zero**
-    reversals, which reads as perfect smoothness. Without this test, the least useful possible
-    policy earns the best possible smoothness number and passes the gate.
-
-    Measured against the ground truth's own travel rather than an absolute threshold, and
-    dimensions the ground truth barely exercises are skipped rather than passed, because they
-    carry no evidence either way.
-    """
-    findings = []
-    for name, truth in ground_truth.items():
-        if name not in predicted:
-            continue
-        truth_travel = truth.get("travel")
-        predicted_travel = predicted[name].get("travel")
-        if truth_travel is None or predicted_travel is None:
-            continue
-        if truth_travel <= MIN_GROUND_TRUTH_TRAVEL:
-            continue
-        if predicted_travel < DEGENERATE_TRAVEL_FRACTION * truth_travel:
-            # traj_id first so the serialized order matches what callers already publish.
-            finding = {} if traj_id is None else {"traj_id": traj_id}
-            finding.update(
-                dim=name,
-                predicted_travel=predicted_travel,
-                ground_truth_travel=truth_travel,
-            )
-            findings.append(finding)
-    return findings

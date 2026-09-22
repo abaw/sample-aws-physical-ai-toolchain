@@ -214,7 +214,7 @@ rehearsal mode on, and a run that looks correct in every other respect simply wi
 ### Rehearse in this order
 
 1. **Stage 03 on this exact checkpoint.** An under-trained policy looks like a miswired one on
-   hardware. Check `degenerate_prediction` first.
+   hardware. Compare its reversal rate and per-joint travel against the ground truth's.
 2. **`no_motion=true`, arm powered but limp.** Everything runs — both tasks gang-schedule, the client
    resolves the server's host, the observation passes the server, chunk length is checked, real
    end-to-end latency is measured — with **zero writes** to the servo bus.
@@ -288,7 +288,6 @@ Check the fields in this order. The first two can invalidate everything below th
 | Field | Read it for |
 |---|---|
 | `complete` | Did every requested trajectory get scored? Out-of-range IDs are skipped with a warning, so without this a typo silently shrinks the sample being averaged. False also exits non-zero |
-| `degenerate_prediction` | **Check before the reversal rate.** True means the policy barely moves a joint, so its zero reversal rate means nothing. An under-trained checkpoint emits the dataset's mean pose whatever it is shown |
 | `mse`, `mae` | Is it roughly right? Averaged over trajectories |
 | `mse_by_dim`, `mae_by_dim` | Which joint is wrong. One bad joint hides inside a good average, and a wrong joint *order* shows up as several bad dimensions at once |
 | `worst_reversals_predicted` vs `..._ground_truth` | Is it smooth? The ground-truth figure is the reference and a check on the metric: teleop recordings of this task score under 1%, so if it does not, the metric or the dataset is wrong rather than the policy |
@@ -299,10 +298,9 @@ Check the fields in this order. The first two can invalidate everything below th
 
 `reversal_rate`, the per-dimension summary and the degeneracy test live in
 [`../so101-vla/files/trajectory_metrics.py`](../so101-vla/files/trajectory_metrics.py) and are injected
-by relative path, the same way the robot client is. The degeneracy test is the reason: it is what stops a
-policy that does not move from passing a smoothness gate, and a second copy that drifted would stop
-catching exactly the case it exists for. Both models' scorers import it, so both publish
-`degenerate_prediction` with the same meaning.
+by relative path, the same way the robot client is. They were byte-identical copies in both scorers, and
+a statistic that two pipelines report under the same name should be the same code — otherwise the numbers
+stop being comparable, which is the reason for running a second model at all.
 
 Sharing it changed no number here: the summary is defined over a list of chunks, a single trajectory is a
 list of one, and reversals-averaged-per-chunk reduces to the per-series value when there is one chunk.
@@ -320,8 +318,8 @@ directly comparable — which is the reason for running a second model at all. F
 monotonic ramp scores 0, a random walk 50%, uncorrelated noise 67%. Above `warn_reversals` (0.25 by
 default) the stage warns.
 
-**But zero is ambiguous**, which is why `degenerate_prediction` exists: a constant output and a
-perfectly smooth sweep both score 0 reversals. The flag compares predicted travel against the ground
+**But zero is ambiguous**, which is why per-joint `travel` is reported next to it: a constant output and a
+perfectly smooth sweep both score 0 reversals. Travel compares against the ground
 truth's own travel per dimension, rather than against an absolute threshold, since what counts as
 "barely moving" depends on the task.
 
@@ -337,10 +335,10 @@ Honest per stage, as of 2026-09-16:
 | Stage 02 trains and publishes a checkpoint | Validated at 50 steps | peak 39.71 GB, 0.743 s/step — reproduces the sizing table above |
 | Stage 02 at 80,000 steps (17 epochs) | Validated | 16h55m end to end, 4h14m per 20,000 steps, peak 39.71 GB, 0.749 s/step — reproduces the sizing table. Four checkpoints published; the final learning rate reached its configured floor, confirming the cosine schedule completed |
 | Stage 03 scores a checkpoint and writes metrics and plots | Validated | 3 trajectories against a 50-step checkpoint; ground-truth reversal rate 1.57%, which agrees with the sub-1% expected of teleop data |
-| Stage 03's guards fire | Validated | an out-of-range trajectory ID gives `complete: false` and a non-zero exit; the 50-step checkpoint's constant output is caught as `degenerate_prediction` on 12 trajectory/dimension pairs |
+| Stage 03's guards fire | Validated | an out-of-range trajectory ID gives `complete: false` and a non-zero exit |
 | Stage 04, no-motion rehearsal | Validated | both tasks gang-scheduled, host token resolved, observation accepted, 22 replans at 16.5 Hz, zero writes to the bus, zero envelope clipping |
 | Stage 04, powered | Validated on real hardware | ±2° jitter, 161 steps over 10.2 s of driving at 15.8 Hz; the arm tracked (gravity-loaded joints undershot ~1.9°, wrist and gripper within 0.2°), returned to within 0.88° of its start pose, peaked at 37 °C, and torque was verified off on all six joints |
-| Stage 03 on a trained checkpoint | Validated | 80,000 steps: MSE 2.79, MAE 0.70, `degenerate_prediction: false`, worst reversals 11.8% against ground truth's 1.8%. At 20,000 steps: MSE 203.1 — so training length dominates, by 73x |
+| Stage 03 on a trained checkpoint | Validated | 80,000 steps: MSE 2.79, MAE 0.70, worst reversals 11.8% against ground truth's 1.8%. At 20,000 steps: MSE 203.1 — so training length dominates, by 73x |
 | Stage 04 powered with a trained policy | Validated end to end | three 60 s intervals, 150 s of driving, torque verified off on all six joints, returned to 1.14 deg, peak 37 deg C, no thermal rests |
 | **Task performance** | **Poor, and not addressed here** | the policy runs the loop safely and its trajectories score well against recorded ones, but it does not perform the task usefully on real hardware. This example exists to show the pipeline is not shaped around one model; making a policy work is a separate problem. Likely places to look: 43 episodes is under-provisioned (SmolVLA's docs call 25 insufficient and 50 a floor), and `action_horizon` 16 makes the arm pause at every chunk boundary |
 
@@ -356,7 +354,6 @@ Honest per stage, as of 2026-09-16:
 | `FileExistsError: Output directory ... already exists` | `lerobot-train` refuses a pre-existing output dir unless resuming | already handled — the dir is removed, not created |
 | `ModuleNotFoundError` naming `lerobot[pi]` | that extra does not exist at v0.6.1, though `require_package` names it | install `transformers-dep,scipy-dep,dataset,training` — see `files/pi0fast/install_pi0fast.sh` |
 | Stage 03 exits non-zero with "requested trajectory/ies never scored" | a `traj_ids` value the dataset does not have | fix the IDs; the dataset's episode count is in the message |
-| Stage 03 reports `degenerate_prediction: true` | the policy emits a near-constant pose — normal for an under-trained checkpoint | train longer before reading any other metric |
 | Stage 04 completes but the arm never moves | `no_motion` defaults to true and was not overridden | pass `no_motion=false`; confirm with `summary.no_motion` in `results.json` |
 | Stage 04's client dies on the first ping | a transport whose `ping()` raises instead of returning false | the client polls `ping()` bare for up to `policy_wait_s` while the server loads; it must never raise |
 | The arm pauses at chunk boundaries | the round-trip p99 exceeds the motion a chunk buys | raise `action_horizon` to at least `p99_ms x control_hz / 1000`, or accept it — the arm holds its last commanded pose, which is safe |

@@ -174,36 +174,26 @@ The checkpoint is identified by its source URL and the step read from the checkp
 local path: inputs are downloaded into a numbered directory, which says nothing about which run produced
 them.
 
-### `degenerate_prediction` is why a smoothness score can be trusted
+### Consistent key names across models
 
-`metrics.json` also carries the flat, contract-named figures every model in this repo publishes, so one
-gate reads them all: `mse`, `mae`, `worst_reversals_predicted`, `worst_reversals_ground_truth`,
-`degenerate_prediction` and `degenerate_dimensions`. The older `average_mse` and nested `smoothness`
-object are kept alongside them rather than renamed, because past runs and this README already report
-those names.
+`metrics.json` also carries the flat figures every model in this repo publishes under the same names, so
+one reader handles them all: `mse`, `mae`, `worst_reversals_predicted`, `worst_reversals_ground_truth`.
+The older `average_mse` and nested `smoothness` object are kept alongside them rather than renamed,
+because past runs and this README already report those names. `travel` per joint is reported too — how
+far each joint went over the trajectory, which is what makes a reversal rate of zero readable, since a
+constant output and a perfectly smooth sweep both score 0.
 
-**A constant prediction scores zero reversals, which is the best possible smoothness number.** An
-under-trained checkpoint does exactly that — it emits the dataset's mean pose whatever it is shown — so
-without a second test, the least useful policy imaginable earns a perfect smoothness score.
-`degenerate_prediction` is that test: per dimension, it compares how far the prediction travelled
-against how far the ground truth travelled, relative rather than absolute because what counts as barely
-moving depends on the task. Dimensions the ground truth barely exercises are skipped, not passed, since
-they carry no evidence. A true value **fails the stage**.
-
-It is three-valued. `false` means checked and the policy moves, `true` means checked and it does not, and
-`null` means the smoothness pass produced nothing — which is allowed, since a smoothness crash should not
-destroy an otherwise valid error measurement. `null` does not fail the stage: with no smoothness pass
-there is also no smoothness score, so there is no good-looking number for a motionless policy to hide
-behind. It is reported loudly regardless, because a check that quietly did not run is worse than one
-that fails.
+**These numbers do not tell you whether the policy performs the task.** They catch the failures that are
+cheap to catch offline — a wrong joint order, missing normalisation statistics, jitter that would cook a
+servo. Whether the arm actually does the job is settled by watching it.
 
 ### The error metrics are not reproducible, so do not gate on a threshold
 
 Three runs of the **same checkpoint over the same trajectories** produced MSE 15.53, 13.70 and 11.49 —
 a 35% spread — with MAE moving far less. The sampling is not seeded. Consequences worth internalising:
 
-- **A numeric MSE threshold is not a gate**, it is a coin toss near the boundary. `complete` and
-  `degenerate_prediction` are boolean and stable, which is why those are what the stage fails on.
+- **A numeric MSE threshold is not a gate**, it is a coin toss near the boundary. `complete` is boolean
+  and stable, which is why that is what the stage fails on.
 - **Comparing two models, or two checkpoints, from single runs measures noise.** Repeat, or compare
   distributions.
 - Reversal rates move too, though proportionally less: 0.619 and 0.714 across two identical runs.

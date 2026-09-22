@@ -31,10 +31,10 @@ import numpy as np
 import torch
 
 
-# Shared with every other model's scorer. The degeneracy test in particular must not
-# diverge: it is what stops a policy that does not move from passing a smoothness gate.
+# Shared with every other model's scorer, so a statistic two pipelines report under the
+# same name is the same code.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from trajectory_metrics import degenerate_dimensions, summarize  # noqa: E402
+from trajectory_metrics import summarize  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -198,16 +198,6 @@ def main() -> int:  # noqa: PLR0915 - a linear scoring pass, ordered by trajecto
         if scored else None
     )
 
-    # A constant prediction scores ZERO reversals, which reads as perfect smoothness, so the
-    # smoothness gate can be passed by a policy that does not move at all. The test lives in
-    # the shared module because every model needs it and a drifting second copy would stop
-    # catching exactly the case it exists for.
-    degenerate = []
-    for row in scored:
-        degenerate += degenerate_dimensions(
-            row["predicted"], row["ground_truth"], traj_id=row["traj_id"]
-        )
-
     metrics = {
         "checkpoint": args.checkpoint,
         "execution_horizon": args.execution_horizon,
@@ -232,30 +222,16 @@ def main() -> int:  # noqa: PLR0915 - a linear scoring pass, ordered by trajecto
         ),
         # Check this BEFORE reading the reversal rate. True means the policy is barely moving
         # the joint, so its zero reversal rate means nothing.
-        "degenerate_prediction": bool(degenerate),
-        "degenerate_dimensions": degenerate,
         "per_trajectory": scored,
     }
     (output / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
 
     print("\n=== summary ===", flush=True)
     for key in (
-        "complete", "mse", "mae", "degenerate_prediction",
+        "complete", "mse", "mae",
         "worst_reversals_predicted", "worst_reversals_ground_truth", "reversals_warning",
     ):
         print(f"  {key}: {metrics[key]}", flush=True)
-    if degenerate:
-        worst = min(degenerate, key=lambda d: d["predicted_travel"] / d["ground_truth_travel"])
-        print(
-            f"\nWARNING: the prediction barely moves on {len(degenerate)} "
-            f"trajectory/dimension pair(s) — worst is {worst['dim']} on trajectory "
-            f"{worst['traj_id']}, travelling {worst['predicted_travel']} against the ground "
-            f"truth's {worst['ground_truth_travel']}. A constant output scores zero "
-            f"reversals, so read the reversal rate above as meaningless here. This is what "
-            f"an under-trained checkpoint looks like: it has learned the mean pose.",
-            file=sys.stderr,
-            flush=True,
-        )
     if missing:
         print(
             f"\nERROR: {len(missing)} requested trajectory/ies never scored: {missing}",

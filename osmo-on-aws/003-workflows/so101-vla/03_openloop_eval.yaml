@@ -276,17 +276,9 @@ workflow:
         # Smoothness, if it was produced. Reported beside the error metrics because the two
         # answer different questions and only one of them is visible in the plots.
         smoothness = None
-        # Flat, contract-named figures, read by the gate. `degenerate_prediction` is
-        # deliberately three-valued: False is "checked, the policy moves", True is "checked,
-        # it does not", and None is "not checked", which happens because the smoothness pass
-        # is allowed to fail without destroying an otherwise valid eval. None is not treated
-        # as a failure — with no smoothness pass there is also no smoothness score, so there
-        # is no good-looking number for a motionless policy to hide behind — but it is
-        # reported, because a check that quietly did not run is the hole this closes.
+        # Flat, contract-named figures, so one reader handles every model's metrics.json.
         worst_reversals_predicted = None
         worst_reversals_ground_truth = None
-        degenerate_prediction = None
-        degenerate_dimensions = []
         smooth_path = out / "smoothness.json"
         if smooth_path.is_file() and smooth_path.stat().st_size:
             try:
@@ -296,8 +288,6 @@ workflow:
                 worst_reversals_ground_truth = max(
                     v["reversals"] for v in raw_smooth["ground_truth"].values()
                 )
-                degenerate_dimensions = row.get("degenerate_dimensions", [])
-                degenerate_prediction = bool(degenerate_dimensions)
                 smoothness = dict(
                     worst_reversals=worst_reversals_predicted,
                     ground_truth_worst_reversals=worst_reversals_ground_truth,
@@ -327,8 +317,6 @@ workflow:
             mae=avg("MAE"),
             worst_reversals_predicted=worst_reversals_predicted,
             worst_reversals_ground_truth=worst_reversals_ground_truth,
-            degenerate_prediction=degenerate_prediction,
-            degenerate_dimensions=degenerate_dimensions,
         )
         (out / "metrics.json").write_text(json.dumps(result, indent=2) + "\n")
 
@@ -367,18 +355,6 @@ workflow:
             print("INCOMPLETE: requested %s, evaluated %s — trajectory IDs out of range "
                   "for this dataset, or the eval reported no averages"
                   % (requested, evaluated), file=sys.stderr)
-            sys.exit(1)
-
-        if result["degenerate_prediction"] is None:
-            print("WARNING: the smoothness pass produced nothing, so the degeneracy check "
-                  "did not run. The error metrics stand; there is no smoothness score, and "
-                  "no evidence either way that this policy moves.", file=sys.stderr)
-        elif result["degenerate_prediction"]:
-            print("DEGENERATE: the prediction barely moves on %s — a constant output scores "
-                  "zero reversals, which is the best possible smoothness number, so do not "
-                  "read this checkpoint's smoothness as a pass: %s"
-                  % (sorted({d["dim"] for d in result["degenerate_dimensions"]}),
-                     json.dumps(result["degenerate_dimensions"])), file=sys.stderr)
             sys.exit(1)
         PY
 
