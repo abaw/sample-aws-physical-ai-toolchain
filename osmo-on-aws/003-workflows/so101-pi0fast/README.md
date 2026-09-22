@@ -237,6 +237,24 @@ policies it supports and `pi0_fast` is not among them. So `files/pi0fast/serve_p
 contract the client already speaks and adapts it to LeRobot's batch format. The contract is the
 pipeline's interface; each model's server meets it.
 
+### Cameras: `cameras`, and why the server refuses a rig it was not trained on
+
+`cameras` takes `NAME=SPEC` entries separated by `;`, where `NAME` is the dataset's image-feature
+suffix and `SPEC` is either a selector resolved against sysfs on the machine or any value OpenCV
+accepts. The forms and how to survey your own bench are documented once, in
+[`../so101-vla/README.md`](../so101-vla/README.md) — the client is shared, so the flag is too.
+
+The server refuses a camera set the checkpoint was not trained on, **in both directions**. A missing
+camera cannot be substituted; an extra one is the subtler case, because iterating the expected keys
+would simply drop it and return an action computed from a rig the policy never saw. Nothing downstream
+can detect that, so it is an error here. The check runs on the first observation, which the client
+sends during warm-up with the arm still limp.
+
+The two pipelines place this check differently, for a reason worth knowing: this adapter validates
+per request because it already inspects every observation, while GR00T's server is upstream's and
+silently drops extras, so that one is given the expected names at startup and refuses to serve at all.
+Same guarantee — nothing reaches torque — reached from different directions.
+
 ### `jitter_deg`, for testing tracking
 
 An under-trained checkpoint emits a constant pose, which proves the transport and the release path

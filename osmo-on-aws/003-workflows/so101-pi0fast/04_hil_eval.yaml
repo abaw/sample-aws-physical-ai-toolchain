@@ -107,8 +107,13 @@ default-values:
   robot_platform: so101-edge
   policy_platform: l40s
   robot_port: /dev/ttyACM0
-  front_camera: /dev/video2
-  wrist_camera: /dev/video4
+  # NAME=SPEC per camera, ';'-separated. NAME must be the dataset's image-feature suffix,
+  # because that is what the policy server matches on. SPEC is either a selector resolved on
+  # the machine at run time — `sysfs:<glob of the device path>` or `name:<glob of the v4l2
+  # card name>`, each matching exactly one capture device — or any value OpenCV takes.
+  # **Prefer a selector**: /dev/videoN is assigned in enumeration order, so a replug renumbers
+  # it and the run drives on the wrong camera's frames without complaining. See README.md.
+  cameras: "front=/dev/video2;wrist=/dev/video4"
   camera_width: 640
   camera_height: 480
   camera_fps: 30
@@ -228,10 +233,11 @@ workflow:
       # Without it every device open fails on the container device cgroup, while the device
       # itself looks present and correctly owned.
       privileged: true
+      # No camera mounts. A camera spec may be a selector that only resolves on the node, so
+      # there is no device path to declare here — and a privileged container is handed the
+      # host's whole /dev anyway, which is what lets resolution work at all.
       volumeMounts:
         - "{{ robot_port }}"
-        - "{{ front_camera }}"
-        - "{{ wrist_camera }}"
       outputs:
       - url: "{{ storage_url }}/hil/pi0fast/{{workflow_id}}/"
       files:
@@ -296,6 +302,16 @@ workflow:
 {% endif %}
           echo "extra arguments: ${EXTRA[*]-none}"
 
+          # One --camera per entry, so the count is a variable and not a spec change. Split in
+          # bash rather than in Jinja because a quote literal inside a Jinja expression is
+          # unsafe in this position.
+          CAMERAS=()
+          IFS=';' read -ra CAMERA_SPECS <<< "{{ cameras }}"
+          for SPEC in "${CAMERA_SPECS[@]}"; do
+            CAMERAS+=(--camera "$SPEC")
+          done
+          echo "cameras: ${CAMERAS[*]}"
+
           # PYTHONPATH so `--transport-module zmq_transport` resolves to this pipeline's
           # transport rather than the client's default.
           export PYTHONPATH=/tmp
@@ -310,8 +326,7 @@ workflow:
             --policy-retries {{ policy_retries }} \
             --robot-port {{ robot_port }} \
             --robot-id {{ robot_id }} \
-            --front-camera {{ front_camera }} \
-            --wrist-camera {{ wrist_camera }} \
+            "${CAMERAS[@]}" \
             --camera-width {{ camera_width }} \
             --camera-height {{ camera_height }} \
             --camera-fps {{ camera_fps }} \

@@ -132,11 +132,26 @@ default-values:
 
   # --- the machine ----------------------------------------------------------
   # Per-machine facts, not properties of this example. Survey them on your own node: a
-  # serial device's number depends on plug order, and two identical cameras produce an
-  # identical /dev/v4l/by-id string, so by-path is the only stable handle.
+  # serial device's number depends on plug order, and so does a camera's.
   robot_port: /dev/ttyACM0
-  front_camera: /dev/video2
-  wrist_camera: /dev/video4
+  # NAME=SPEC per camera, ';'-separated. NAME must be the dataset's image-feature suffix,
+  # because that is what the policy server matches on.
+  #
+  # SPEC is either a selector resolved on the machine at run time, or any value OpenCV
+  # takes. **Prefer a selector**: /dev/videoN is assigned in enumeration order, so a replug
+  # or a reboot renumbers it and the run then drives on the wrong camera's frames without
+  # complaining. The two selector forms, each of which must match exactly one capture device:
+  #
+  #   front=sysfs:*/3-5.1/*     glob over the device's sysfs path — stable per physical port
+  #   front=name:Some Camera*   glob over the v4l2 card name — use when the models differ
+  #
+  # Survey both on your own node with:
+  #   for d in /sys/class/video4linux/*; do
+  #     echo "$d $(cat $d/name) index=$(cat $d/index)"; readlink -f $d; done
+  # index 0 is the capture node; a UVC camera's other node carries only metadata. Two
+  # identical cameras report the same name and an empty serial, so the sysfs path is then
+  # the only thing that separates them.
+  cameras: "front=/dev/video2;wrist=/dev/video4"
   camera_width: 640
   camera_height: 480
   camera_fps: 30
@@ -270,6 +285,13 @@ workflow:
             exit 1
           fi
 
+          # The camera NAMES only, never the device half: this machine has no cameras
+          # attached, so a device path here would be meaningless. The server compares them
+          # against the checkpoint's own video keys and refuses a rig the policy was not
+          # trained on — before the robot task enables torque.
+          CAMERA_NAMES="$(printf '%s' "{{ cameras }}" | tr ';' '\n' | cut -d= -f1 | paste -sd, -)"
+          echo "camera names the robot will send: ${CAMERA_NAMES}"
+
           cd "${GROOT_DIR}"
           # -u because the server's own error handler prints a traceback and then keeps
           # serving, so its stdout is a pipe that stays open: block buffering means the
@@ -280,6 +302,7 @@ workflow:
             --embodiment-tag new_embodiment \
             --host 0.0.0.0 \
             --port {{ policy_port }} \
+            --expect-cameras "${CAMERA_NAMES}" \
             --denoising-steps {{ denoising_steps }}
 
     - name: robot-client
@@ -292,10 +315,11 @@ workflow:
       # Without it every device open fails on the container device cgroup, while the
       # device itself looks present and correctly owned.
       privileged: true
+      # No camera mounts. A camera spec may be a selector that only resolves on the node,
+      # so there is no device path to declare here — and a privileged container is handed
+      # the host's whole /dev anyway, which is what lets resolution work at all.
       volumeMounts:
         - "{{ robot_port }}"
-        - "{{ front_camera }}"
-        - "{{ wrist_camera }}"
       outputs:
       - url: {{ storage_url }}/hil/{{ model }}/{{workflow_id}}/
       files:
@@ -365,6 +389,16 @@ workflow:
 {% endif %}
           echo "extra arguments: ${EXTRA[*]-none}"
 
+          # One --camera per entry, so the count is a variable and not a spec change. Split
+          # in bash rather than in Jinja because a quote literal inside a Jinja expression
+          # is unsafe in this position.
+          CAMERAS=()
+          IFS=';' read -ra CAMERA_SPECS <<< "{{ cameras }}"
+          for SPEC in "${CAMERA_SPECS[@]}"; do
+            CAMERAS+=(--camera "$SPEC")
+          done
+          echo "cameras: ${CAMERAS[*]}"
+
           # pipefail is set, so the eval still fails the task despite the tee.
           python /tmp/eval_so101_bounded.py \
             --policy-host {{host:policy-server}} \
@@ -375,8 +409,7 @@ workflow:
             --policy-retries {{ policy_retries }} \
             --robot-port {{ robot_port }} \
             --robot-id {{ robot_id }} \
-            --front-camera {{ front_camera }} \
-            --wrist-camera {{ wrist_camera }} \
+            "${CAMERAS[@]}" \
             --camera-width {{ camera_width }} \
             --camera-height {{ camera_height }} \
             --camera-fps {{ camera_fps }} \

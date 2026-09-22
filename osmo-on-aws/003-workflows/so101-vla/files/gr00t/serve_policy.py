@@ -53,6 +53,14 @@ def main() -> int:
         help="Skip server-side observation/action validation. Leave it on: it is what "
         "turns a malformed observation into a named error instead of a wrong action.",
     )
+    parser.add_argument(
+        "--expect-cameras",
+        default=None,
+        help="Comma-separated camera names the robot will send. Compared against the "
+        "checkpoint's own video keys, and a mismatch refuses to serve. Without this the "
+        "server accepts an extra camera and silently drops it, which is a wrong-input "
+        "bug no metric downstream can see.",
+    )
     args = parser.parse_args()
 
     import torch
@@ -83,7 +91,27 @@ def main() -> int:
     print(f"action chunk length: {chunk_length} (client --action-horizon must not exceed it)", flush=True)
     print(f"action keys: {action_config.modality_keys}", flush=True)
     print(f"state keys: {policy.modality_configs['state'].modality_keys}", flush=True)
-    print(f"video keys: {policy.modality_configs['video'].modality_keys}", flush=True)
+    video_keys = list(policy.modality_configs["video"].modality_keys)
+    print(f"video keys: {video_keys}", flush=True)
+
+    # The server holds the checkpoint, so it is the only component that can tell whether
+    # the rig about to be pointed at it is the one the policy was trained on. Upstream does
+    # not check: an extra camera is dropped and a run completes on an input the policy never
+    # saw, which no metric downstream can detect. Refusing here happens before the robot
+    # task enables torque.
+    if args.expect_cameras:
+        expected = [c for c in args.expect_cameras.split(",") if c]
+        if set(expected) != set(video_keys):
+            print(
+                f"ERROR: this checkpoint was trained on cameras {sorted(video_keys)}, but the "
+                f"robot is configured to send {sorted(expected)} — refusing to serve. Extra "
+                f"cameras are silently dropped and a missing one cannot be substituted, so "
+                f"either would drive the arm from an input the policy was not trained on.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+        print(f"camera set matches the checkpoint: {sorted(expected)}", flush=True)
 
     # Blocks forever. The client carries `lead: true`, so the group ends when the
     # client exits and this task is torn down with it.

@@ -414,21 +414,57 @@ start under `with_robot` as a sizing problem first.
 
 ### Your machine's device paths are not ours
 
-`robot_port`, `front_camera` and `wrist_camera` are per-machine facts, so survey your own:
+`robot_port` and `cameras` are per-machine facts, so survey your own:
 
 - **Two SO-101 arms are indistinguishable by USB serial** — same adapter, same six servos. *Supply
   voltage* tells them apart: the follower runs from a 12 V supply, the leader is bus-powered at ~5 V,
   and reading the voltage register needs no motion.
-- **Two identical USB cameras produce an identical `/dev/v4l/by-id` string**, so their symlinks
-  collide and only one of them appears there at all — which looks exactly like a missing camera. Use
-  `/dev/v4l/by-path/`, which is USB-port-derived.
-- **Each camera claims two `/dev/video*` nodes** and only one carries frames; the other is
-  `Metadata Capture`. Confirm with `v4l2-ctl --all` rather than guessing from the numbering.
-- **Front versus wrist can only be settled by looking at a frame.** With two identical cameras there
-  is no other honest method.
-- The platform's `allowed_mounts` must list every device the task names, and the task needs
-  `privileged: true` — without it a mounted character device is present, correctly owned, and
-  unopenable.
+- **Name a camera by selector, not by `/dev/videoN`.** The number is assigned in enumeration order, so
+  a replug or a reboot renumbers it and the run then drives on the wrong camera's frames and says
+  nothing. `cameras` takes `NAME=SPEC` entries separated by `;`, and a spec may be:
+
+  | Spec | Resolves to |
+  |---|---|
+  | `sysfs:*/3-5.1/*` | the capture device whose sysfs path matches — stable per physical port |
+  | `name:Some Camera*` | the capture device whose v4l2 card name matches — when the models differ |
+  | `/dev/video2`, `0`, `clip.mp4`, a URL | handed to OpenCV untouched; the device node form is the escape hatch, and is the unstable one |
+
+  The client prints what each spec resolved to, and refuses a spec that matches no capture device or
+  more than one rather than picking. `NAME` must be the dataset's image-feature suffix — that is what
+  the policy server matches on, never position.
+
+- **Survey with sysfs, not with `/dev/v4l/by-path/`.** udev's stable symlinks live in the host's
+  `/dev` and a container gets its own, so they are simply absent there. sysfs is host-wide and
+  readable with no mount and no `privileged`:
+
+  ```
+  for d in /sys/class/video4linux/*; do
+    echo "$d  name=$(cat $d/name)  index=$(cat $d/index)"; readlink -f $d
+  done
+  ```
+
+- **Each camera claims two `/dev/video*` nodes** and only one carries frames. `index` says which: 0 is
+  the capture node, the other is `Metadata Capture`. Do not infer it from the numbering — that held on
+  one bench by coincidence.
+- **Two identical cameras report the same name and an empty serial**, so only the sysfs path separates
+  them — and which one is *front* can still only be settled by looking at a frame. With two identical
+  cameras there is no other honest method.
+- The task needs `privileged: true` — without it a mounted character device is present, correctly
+  owned, and unopenable. **Cameras therefore need no `allowed_mounts` entry and none is declared**: a
+  privileged container receives the host's whole `/dev`, which is also what makes run-time resolution
+  possible. `allowed_mounts` still gates the serial port for an unprivileged task, and still documents
+  intent.
+
+**The server refuses a camera set the checkpoint was not trained on.** The spec passes the camera
+*names* — never the device half, since the policy machine has no cameras attached — and the server
+compares them against the checkpoint's own video keys before it starts serving. A mismatch either way
+fails the task, so the robot group never reaches torque.
+
+This is not belt-and-braces. Upstream's server **silently drops** a camera it was not trained on: a
+three-camera rig pointed at a two-camera checkpoint otherwise runs to completion, reports success, and
+has driven the arm from an input the policy never saw — which no metric in the pipeline can detect. The
+one thing neither this check nor any configuration can catch is two identical cameras swapped between
+their sockets. For that, look at a frame.
 
 ### Calibration is the correctness question, not a detail
 

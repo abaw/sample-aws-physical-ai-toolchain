@@ -38,7 +38,9 @@ the live arm before any torque is enabled.
 
 import argparse
 import dataclasses
+import fnmatch
 import json
+import os
 import pathlib
 import signal
 import statistics
@@ -96,6 +98,125 @@ class Cooldown(Exception):
 
 
 _stop = threading.Event()
+
+
+# ---------------------------------------------------------------------------
+# Cameras
+#
+# A camera is named by the dataset's image-feature suffix, and pointed at by a spec that is
+# either resolved against sysfs or handed to OpenCV untouched.
+#
+# /dev/videoN is assigned in enumeration order, so a replug or a reboot renumbers it: a spec
+# naming one directly is a value that goes stale without saying so, and the arm then faithfully
+# drives on the wrong camera's frames. The selector forms name something durable instead. sysfs
+# is host-wide and mounted into every container by the runtime, so resolving needs no
+# volumeMount and no privileged.
+
+V4L2_SYSFS = pathlib.Path("/sys/class/video4linux")
+
+
+def _v4l2_nodes() -> list[dict]:
+    """Every v4l2 node the kernel knows about, whatever bus it sits on.
+
+    A node is identified by its **major:minor**, not by its name: the number in ``videoN``
+    is the thing being distrusted, so matching the container's ``/dev`` entry by name would
+    reintroduce the assumption the selector exists to remove.
+    """
+    nodes = []
+    for entry in sorted(V4L2_SYSFS.glob("video*")):
+        try:
+            major, minor = (int(x) for x in (entry / "dev").read_text().strip().split(":"))
+            nodes.append(
+                {
+                    "sysfs": str(entry.resolve()),
+                    "name": (entry / "name").read_text().strip(),
+                    "index": int((entry / "index").read_text().strip()),
+                    "rdev": os.makedev(major, minor),
+                }
+            )
+        except (OSError, ValueError):
+            # A node that disappeared mid-scan, or one whose attributes a driver does not
+            # publish. Skipping is right: it cannot be selected either way.
+            continue
+    return nodes
+
+
+def _device_for_rdev(rdev: int) -> pathlib.Path | None:
+    """The ``/dev`` entry with this major:minor, or None if it was not granted to us."""
+    for candidate in sorted(pathlib.Path("/dev").glob("video*")):
+        try:
+            if os.stat(candidate).st_rdev == rdev:
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _resolve_camera_spec(spec: str) -> tuple[object, str]:
+    """One ``--camera`` spec into something ``cv2.VideoCapture`` accepts.
+
+    Returns ``(index_or_path, account)``, where the account is printed so a run's log
+    records which physical device it actually opened rather than which one it was asked for.
+    """
+    for prefix, field in (("sysfs:", "sysfs"), ("name:", "name")):
+        if not spec.startswith(prefix):
+            continue
+        pattern = spec[len(prefix) :]
+        if not pattern:
+            raise Abort(f"camera spec {spec!r} has an empty pattern")
+
+        # index 0 is the capture node on a UVC camera and the others carry metadata, so this
+        # filter is what stops a two-node camera matching itself twice. It is a convenience,
+        # not a guarantee: a wrong pick would fail in cv2 at connect() anyway.
+        capture = [n for n in _v4l2_nodes() if n["index"] == 0]
+        matches = [n for n in capture if fnmatch.fnmatch(n[field], pattern)]
+        if not matches:
+            seen = ", ".join(repr(n[field]) for n in capture) or "none"
+            raise Abort(f"camera spec {spec!r} matched no capture device. Present: {seen}")
+        if len(matches) > 1:
+            raise Abort(
+                f"camera spec {spec!r} is ambiguous, matching "
+                + ", ".join(m["sysfs"] for m in matches)
+                + " — refusing to guess which one the dataset means"
+            )
+
+        node = matches[0]
+        device = _device_for_rdev(node["rdev"])
+        if device is None:
+            raise Abort(
+                f"camera spec {spec!r} resolved to {node['sysfs']}, but no /dev entry with "
+                f"that major:minor is visible here"
+            )
+        return device, f"{spec} -> {device} ({node['name']}, {node['sysfs']})"
+
+    # Not a selector, so it is OpenCV's own vocabulary: an index, a device node, a video
+    # file, or a URL. Deliberately not re-validated — cv2.VideoCapture accepts more forms
+    # than a check here would, and narrowing it is how the /dev/video2 assumption got in.
+    if spec.isdigit():
+        return int(spec), f"{spec} -> OpenCV index {spec} (verbatim)"
+    if spec.startswith("/") or pathlib.Path(spec).exists():
+        return pathlib.Path(spec), f"{spec} -> {spec} (verbatim, not resolved)"
+    return spec, f"{spec} -> {spec} (verbatim, handed to OpenCV as-is)"
+
+
+def _parse_cameras(values: list[str]) -> dict[str, str]:
+    """``NAME=SPEC`` pairs into an ordered mapping, with the wire-name rule enforced."""
+    cameras: dict[str, str] = {}
+    for value in values or []:
+        name, sep, spec = value.partition("=")
+        if not sep or not name or not spec:
+            raise Abort(f"--camera wants NAME=SPEC, got {value!r}")
+        # The name goes on the wire and into a dataset feature key, where a dot or a comma
+        # changes how something downstream parses it. Same rule the pipeline's preflight applies.
+        bad = [c for c in ".,= \t" if c in name]
+        if bad:
+            raise Abort(f"camera name {name!r} must not contain {''.join(bad)!r}")
+        if name in cameras:
+            raise Abort(f"camera {name!r} given twice")
+        cameras[name] = spec
+    if not cameras:
+        raise Abort("at least one --camera is required")
+    return cameras
 
 
 def _install_signal_handlers() -> None:
@@ -684,9 +805,12 @@ class PolicyLink:
     release.
     """
 
-    def __init__(self, host, port, *, loop_timeout_ms, setup_timeout_s, retries):
+    def __init__(self, host, port, *, camera_names, loop_timeout_ms, setup_timeout_s, retries):
         self._client_cls = _transport().PolicyClient
         self.host, self.port = host, port
+        # Which frames go in an observation, and under what names. The server matches them
+        # by name and never by position, so this is the whole of the camera contract here.
+        self.camera_names = list(camera_names)
         self.loop_timeout_ms = loop_timeout_ms
         self.setup_timeout_ms = int(setup_timeout_s * 1000)
         self.retries = retries
@@ -747,16 +871,18 @@ class PolicyLink:
             self.client.close()
             self.client = None
 
-    @staticmethod
-    def build_observation(obs: dict, instruction: str) -> dict:
-        """Upstream's observation contract, unchanged.
+    def build_observation(self, obs: dict, instruction: str) -> dict:
+        """Upstream's observation contract, over however many cameras are configured.
 
         ``float32`` is not incidental: the server validates dtypes and rejects anything
         else, which is the good outcome — the alternative is a silently rescaled state.
+
+        The frame keys are the configured camera names, so a missing one is a `KeyError`
+        naming the camera rather than a shape mismatch discovered on the server.
         """
         state = np.array([obs[key] for key in STATE_KEYS], dtype=np.float32)
         model_obs = {
-            "video": {"front": obs["front"], "wrist": obs["wrist"]},
+            "video": {name: obs[name] for name in self.camera_names},
             "state": {"single_arm": state[:5], "gripper": state[5:6]},
             "language": {LANGUAGE_KEY: instruction},
         }
@@ -1073,8 +1199,19 @@ def build_parser() -> argparse.ArgumentParser:
         "joint frame the dataset was recorded in. When omitted, the calibration is read "
         "from the servos, which is where LeRobot stores it.",
     )
-    g.add_argument("--front-camera", default="/dev/video2")
-    g.add_argument("--wrist-camera", default="/dev/video4")
+    g.add_argument(
+        "--camera",
+        action="append",
+        dest="cameras",
+        metavar="NAME=SPEC",
+        help="Repeatable, once per camera. NAME is the dataset's image-feature suffix and "
+        "is what the policy server matches on. SPEC is either a selector resolved against "
+        "sysfs on this machine — 'sysfs:<glob of the device path>' or 'name:<glob of the "
+        "v4l2 card name>', each of which must match exactly one capture device — or any "
+        "value OpenCV accepts, passed through untouched: a device node, an index, a video "
+        "file, a URL. Prefer a selector: /dev/videoN is assigned in enumeration order, so "
+        "it changes on replug and fails silently by opening the wrong camera.",
+    )
     g.add_argument("--camera-width", type=int, default=640)
     g.add_argument("--camera-height", type=int, default=480)
     g.add_argument("--camera-fps", type=int, default=30)
@@ -1220,6 +1357,14 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
     # early: it unwinds through the same return-and-release path a timeout does.
     _install_signal_handlers()
 
+    # Before anything else, because a malformed --camera is a usage error: there is no arm
+    # to release yet, and failing here costs nothing.
+    try:
+        camera_specs = _parse_cameras(args.cameras)
+    except Abort as exc:
+        print(f"ERROR: {exc}", file=sys.stderr, flush=True)
+        return 2
+
     records: list[dict] = []
     results = {
         "config": {k: v for k, v in vars(args).items()},
@@ -1233,6 +1378,7 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
     policy = PolicyLink(
         args.policy_host,
         args.policy_port,
+        camera_names=list(camera_specs),
         loop_timeout_ms=args.policy_timeout_ms,
         setup_timeout_s=args.policy_setup_timeout_s,
         retries=args.policy_retries,
@@ -1247,7 +1393,19 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
         results["policy_wait_s"] = round(policy.wait_until_ready(args.policy_wait_s), 1)
         policy.open_for_setup()
 
-        # ---- 2. the robot bus ------------------------------------------------
+        # ---- 2. the cameras, resolved but not yet opened ---------------------
+        # Resolution happens here rather than at parse time because it reads the machine,
+        # and it happens before the bus so a stale selector fails with the arm untouched.
+        # Each account is printed so the log records which physical device was opened, not
+        # which one the spec asked for.
+        resolved_cameras = {}
+        for name, spec in camera_specs.items():
+            device, account = _resolve_camera_spec(spec)
+            resolved_cameras[name] = device
+            print(f"camera {name}: {account}", flush=True)
+        results["cameras"] = {name: str(d) for name, d in resolved_cameras.items()}
+
+        # ---- 3. the robot bus ------------------------------------------------
         calibration = None
         if args.calibration_dir:
             path = pathlib.Path(args.calibration_dir) / f"{args.robot_id}.json"
@@ -1270,15 +1428,12 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
                 },
                 cameras={
                     name: OpenCVCameraConfig(
-                        index_or_path=pathlib.Path(device),
+                        index_or_path=device,
                         fps=args.camera_fps,
                         width=args.camera_width,
                         height=args.camera_height,
                     )
-                    for name, device in (
-                        ("front", args.front_camera),
-                        ("wrist", args.wrist_camera),
-                    )
+                    for name, device in resolved_cameras.items()
                 },
             )
         )
@@ -1356,13 +1511,13 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
                 flush=True,
             )
 
-        # ---- 3. the cameras ---------------------------------------------------
+        # ---- 4. the cameras, opened ------------------------------------------
         for name, cam in robot.cameras.items():
             cam.connect()
             cameras_connected.append(cam)
             print(f"camera {name} open", flush=True)
 
-        # ---- 4. warm-up, with the arm still limp ------------------------------
+        # ---- 5. warm-up, with the arm still limp ------------------------------
         # The whole policy path — observation shape, dtypes, server-side validation, chunk
         # length, and whether the returned actions are even inside the arm's reachable
         # range — is exercised here, before torque. If any of it is wrong, the run ends
@@ -1372,7 +1527,7 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
         results["observation_bytes"] = payload
         print(
             f"observation payload: {payload / 1e6:.2f} MB per request "
-            f"({args.camera_width}x{args.camera_height} raw uint8 x2)",
+            f"({args.camera_width}x{args.camera_height} raw uint8 x{len(resolved_cameras)})",
             flush=True,
         )
         # The shape actually going on the wire, as the server will see it after a msgpack
@@ -1436,7 +1591,7 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
                 flush=True,
             )
 
-        # ---- 5. the control loop ------------------------------------------------
+        # ---- 6. the control loop ------------------------------------------------
         policy.close()
         policy.open_for_loop()
         print(f"switching to the control-loop timeout of {args.policy_timeout_ms} ms", flush=True)

@@ -121,9 +121,21 @@ class Pi0FastHandler:
             )
 
         batch: dict = {self.state_key: torch.from_numpy(full_state).unsqueeze(0)}
-        # The contract names cameras "front" and "wrist"; the dataset names them
-        # observation.images.<name>. Mapped by suffix rather than by position, because
-        # swapping the two cameras is a silent failure the policy cannot report.
+        # Cameras are named by the dataset's image-feature suffix — the dataset names them
+        # observation.images.<name> — and matched by name rather than by position, because
+        # swapping two cameras is a silent failure the policy cannot report.
+        #
+        # Both directions are errors. A missing camera is caught in the loop below; an
+        # *extra* one has to be caught here, because iterating the expected keys would
+        # simply drop it and serve an action computed from a rig the policy never saw.
+        expected = {key.rsplit(".", 1)[-1] for key in self.image_keys}
+        unexpected = sorted(set(video) - expected)
+        if unexpected:
+            raise ValueError(
+                f"observation carries camera(s) {unexpected} the checkpoint was not trained "
+                f"on; it expects exactly {sorted(expected)}. Serving anyway would drop them "
+                f"silently and drive from an input the policy never saw."
+            )
         for key in self.image_keys:
             name = key.rsplit(".", 1)[-1]
             if name not in video:
