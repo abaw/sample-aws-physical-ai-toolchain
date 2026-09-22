@@ -21,7 +21,7 @@ to sweep them; the default measures the one value given.
 
 from copy import deepcopy
 import json
-import statistics
+import pathlib
 import sys
 import time
 
@@ -36,49 +36,10 @@ import torch
 
 JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 
-
-def reversal_rate(series: list[float]) -> float:
-    """Fraction of interior samples where the direction of travel flips.
-
-    The statistic the hardware run needed and stage 03 never computed. Scale-free, so a
-    smooth slow trajectory and a smooth fast one both score near zero, and only
-    oscillation scores high — amplitude alone cannot tell traversing the workspace apart
-    from vibrating in place, and it is the latter that overheats a servo.
-
-    For calibration against known signals: a clean monotonic ramp scores 0, a random walk
-    50%, noise on a slow ramp 62%, and uncorrelated noise 67% (analytically 2/3). Teleop
-    recordings of this task score under 1%, so a policy in the 40-70% band is emitting
-    per-step increments with almost no trend.
-    """
-    if len(series) < 3:
-        return float("nan")
-    flips = sum(
-        1
-        for i in range(1, len(series) - 1)
-        if (series[i] - series[i - 1]) * (series[i + 1] - series[i]) < 0
-    )
-    return flips / (len(series) - 2)
-
-
-def summarize(chunks: list[np.ndarray]) -> dict:
-    """Per-joint smoothness over a list of (T, 6) predicted chunks.
-
-    Computed **within** each chunk. The hardware trace showed within-chunk and
-    at-boundary reversal rates were the same, so the chunk itself is where the jitter
-    lives and a per-chunk statistic is the honest one.
-    """
-    out = {}
-    for j, name in enumerate(JOINTS):
-        rates, steps = [], []
-        for chunk in chunks:
-            series = [float(v) for v in chunk[:, j]]
-            rates.append(reversal_rate(series))
-            steps += [abs(series[i] - series[i - 1]) for i in range(1, len(series))]
-        out[name] = {
-            "reversals": round(statistics.fmean(r for r in rates if r == r), 4),
-            "step_p50": round(statistics.median(steps), 4),
-        }
-    return out
+# Shared with every other model's scorer. The degeneracy test in particular must not diverge:
+# it is what stops a policy that does not move from passing a smoothness gate.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from trajectory_metrics import degenerate_dimensions, summarize  # noqa: E402
 
 
 def main() -> int:
@@ -111,7 +72,7 @@ def main() -> int:
             np.concatenate([np.atleast_1d(point.actions[k][0]) for k in action_keys], axis=0)
         )
     truth = np.stack(truth)  # (actual, 6)
-    truth_smooth = summarize([truth])
+    truth_smooth = summarize([truth], JOINTS)
     print("\nground truth (the trajectory the policy is imitating):")
     for name, v in truth_smooth.items():
         print(f"  {name:15s} reversals {v['reversals']:6.1%}   |step| p50 {v['step_p50']:.3f}", flush=True)
@@ -163,7 +124,7 @@ def main() -> int:
             chunks.append(chunk)
             errors.append(chunk - truth[step : step + horizon])
 
-        smooth = summarize(chunks)
+        smooth = summarize(chunks, JOINTS)
         err = np.concatenate(errors, axis=0)
         row = {
             "denoising_steps": denoise,
@@ -173,14 +134,28 @@ def main() -> int:
             "mae": round(float(np.abs(err).mean()), 3),
             "joints": smooth,
             "worst_reversals": round(max(v["reversals"] for v in smooth.values()), 4),
+            # Zero reversals is the *best* possible smoothness score and is also what a
+            # checkpoint emitting a constant pose produces, so the score is uninterpretable
+            # without this. Compared against the ground truth's own travel, since what counts
+            # as barely moving depends on the task.
+            "degenerate_dimensions": degenerate_dimensions(smooth, truth_smooth),
         }
+        row["degenerate_prediction"] = bool(row["degenerate_dimensions"])
         results["sweep"][str(denoise)] = row
         print(
             f"\ndenoising {denoise:3d}: latency p50 {row['latency_p50_ms']:6.1f} ms  "
             f"MSE {row['mse']:8.3f}  MAE {row['mae']:6.3f}  worst reversals "
-            f"{row['worst_reversals']:.1%}",
+            f"{row['worst_reversals']:.1%}"
+            + ("  DEGENERATE" if row["degenerate_prediction"] else ""),
             flush=True,
         )
+        for finding in row["degenerate_dimensions"]:
+            print(
+                f"  WARNING: {finding['dim']} travels {finding['predicted_travel']} against "
+                f"the ground truth's {finding['ground_truth_travel']} — this prediction is "
+                f"barely moving, so its smoothness score means nothing",
+                flush=True,
+            )
         for name, v in smooth.items():
             print(
                 f"  {name:15s} reversals {v['reversals']:6.1%}   |step| p50 {v['step_p50']:.3f}",

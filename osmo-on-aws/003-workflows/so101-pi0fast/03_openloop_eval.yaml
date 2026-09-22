@@ -78,6 +78,10 @@ workflow:
       path: /tmp/install_pi0fast.sh
     - localpath: files/pi0fast/open_loop_eval.py
       path: /tmp/open_loop_eval.py
+    # Shared with every other model's scorer, so it is injected by relative path rather than
+    # copied. Must land beside open_loop_eval.py, which imports it from its own directory.
+    - localpath: ../so101-vla/files/trajectory_metrics.py
+      path: /tmp/trajectory_metrics.py
     command: [bash, -c]
     args:
       - |

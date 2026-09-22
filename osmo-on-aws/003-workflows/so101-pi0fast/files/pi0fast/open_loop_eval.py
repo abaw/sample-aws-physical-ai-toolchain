@@ -31,44 +31,10 @@ import numpy as np
 import torch
 
 
-def reversal_rate(series: list[float]) -> float:
-    """Fraction of interior samples where the direction of travel flips.
-
-    Scale-free, so a smooth slow trajectory and a smooth fast one both score near zero, and
-    only oscillation scores high — amplitude alone cannot tell traversing the workspace apart
-    from vibrating in place, and it is the latter that overheats a servo.
-
-    For calibration against known signals: a clean monotonic ramp scores 0, a random walk
-    50%, noise on a slow ramp 62%, and uncorrelated noise 67% (analytically 2/3). Teleop
-    recordings of this task score under 1%, so a policy in the 40-70% band is emitting
-    per-step increments with almost no trend.
-    """
-    if len(series) < 3:
-        return float("nan")
-    flips = sum(
-        1
-        for i in range(1, len(series) - 1)
-        if (series[i] - series[i - 1]) * (series[i + 1] - series[i]) < 0
-    )
-    return flips / (len(series) - 2)
-
-
-def _summarize(array: np.ndarray, names: list[str]) -> dict:
-    """Per-dimension reversal rate and travel, over a (T, D) trajectory."""
-    out = {}
-    for index, name in enumerate(names):
-        series = [float(v) for v in array[:, index]]
-        steps = [abs(series[i] - series[i - 1]) for i in range(1, len(series))]
-        out[name] = {
-            "reversals": round(reversal_rate(series), 4),
-            "step_p50": round(statistics.median(steps), 4) if steps else None,
-            "min": round(min(series), 3),
-            "max": round(max(series), 3),
-            # Reported beside the reversal rate because zero reversals is ambiguous without
-            # it: a constant output and a perfectly smooth sweep both score 0.
-            "travel": round(max(series) - min(series), 3),
-        }
-    return out
+# Shared with every other model's scorer. The degeneracy test in particular must not
+# diverge: it is what stops a policy that does not move from passing a smoothness gate.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from trajectory_metrics import degenerate_dimensions, summarize  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -179,8 +145,8 @@ def main() -> int:  # noqa: PLR0915 - a linear scoring pass, ordered by trajecto
             "mae_by_dim": {
                 n: round(float(np.abs(error[:, i]).mean()), 4) for i, n in enumerate(names)
             },
-            "predicted": _summarize(predicted_array, names),
-            "ground_truth": _summarize(truth_array, names),
+            "predicted": summarize([predicted_array], names),
+            "ground_truth": summarize([truth_array], names),
         }
         row = per_traj[traj_id]
         worst = max(v["reversals"] for v in row["predicted"].values())
@@ -232,25 +198,15 @@ def main() -> int:  # noqa: PLR0915 - a linear scoring pass, ordered by trajecto
         if scored else None
     )
 
-    # A constant prediction scores ZERO reversals, which reads as perfect smoothness. An
-    # under-trained checkpoint does exactly this — it emits the dataset's mean pose whatever
-    # it is shown — so the smoothness gate can be passed by a policy that does not move at
-    # all. Detected against the ground truth's own travel rather than an absolute threshold,
-    # since what counts as "barely moving" depends on the task.
+    # A constant prediction scores ZERO reversals, which reads as perfect smoothness, so the
+    # smoothness gate can be passed by a policy that does not move at all. The test lives in
+    # the shared module because every model needs it and a drifting second copy would stop
+    # catching exactly the case it exists for.
     degenerate = []
     for row in scored:
-        for name in names:
-            predicted_travel = row["predicted"][name]["travel"]
-            truth_travel = row["ground_truth"][name]["travel"]
-            if truth_travel > 1.0 and predicted_travel < 0.05 * truth_travel:
-                degenerate.append(
-                    {
-                        "traj_id": row["traj_id"],
-                        "dim": name,
-                        "predicted_travel": predicted_travel,
-                        "ground_truth_travel": truth_travel,
-                    }
-                )
+        degenerate += degenerate_dimensions(
+            row["predicted"], row["ground_truth"], traj_id=row["traj_id"]
+        )
 
     metrics = {
         "checkpoint": args.checkpoint,

@@ -295,6 +295,19 @@ Check the fields in this order. The first two can invalidate everything below th
 | `per_trajectory[].predicted[dim].travel` | How far each joint actually moved, against `ground_truth[dim].travel` |
 | `plots/traj_*.png` | Predicted against ground truth, per dimension. The numbers are the gate; the plots show *where* it went wrong |
 
+### The trajectory statistics are shared, not copied
+
+`reversal_rate`, the per-dimension summary and the degeneracy test live in
+[`../so101-vla/files/trajectory_metrics.py`](../so101-vla/files/trajectory_metrics.py) and are injected
+by relative path, the same way the robot client is. The degeneracy test is the reason: it is what stops a
+policy that does not move from passing a smoothness gate, and a second copy that drifted would stop
+catching exactly the case it exists for. Both models' scorers import it, so both publish
+`degenerate_prediction` with the same meaning.
+
+Sharing it changed no number here: the summary is defined over a list of chunks, a single trajectory is a
+list of one, and reversals-averaged-per-chunk reduces to the per-series value when there is one chunk.
+Verified over 200 randomised trajectories against the previous implementation, byte-identical.
+
 ### Why smoothness gets its own metric
 
 MSE cannot see jitter. A zero-mean oscillation on a broadly correct trajectory scores well and cooks
