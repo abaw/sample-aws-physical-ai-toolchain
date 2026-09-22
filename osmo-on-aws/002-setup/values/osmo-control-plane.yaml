@@ -301,11 +301,18 @@ services:
             host_network_allowed: false
             # Character devices need it in practice. The blast radius is one
             # single-purpose machine, which is why the node is tainted.
+            #
+            # A privileged container receives the host's whole /dev, so for such a
+            # task allowed_mounts below constrains host paths but NOT devices: it
+            # gets every serial port and camera on the machine whether it asked or
+            # not. The boundary for devices is this flag plus the taint. The list
+            # still documents intent and still gates unprivileged tasks.
             privileged_allowed: true
             # A camera claims two /dev/video* nodes — one Video Capture, one
-            # Metadata Capture — so the count is twice the number of cameras and
-            # only the even members of each pair carry frames. Six covers a
-            # built-in webcam plus two external cameras in any enumeration order.
+            # Metadata Capture — so the count is twice the number of cameras. Six
+            # covers a built-in webcam plus two external cameras in any enumeration
+            # order. Which node of a pair carries frames is not a function of the
+            # number: read /sys/class/video4linux/<node>/index and take index 0.
             allowed_mounts:
               - /dev/ttyACM0
               - /dev/ttyACM1
