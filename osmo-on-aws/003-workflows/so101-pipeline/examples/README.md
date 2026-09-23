@@ -5,6 +5,7 @@ Each file is a list of `key=value` lines. Expand one into a single `--set`:
 ```bash
 osmo workflow submit ../pipeline.yaml \
   --set $(grep -v '^#' full-chain.vars | grep -v '^$' | tr '\n' ' ') \
+        model=gr00t-n17 \
         storage_url=s3://<your-bucket>/so101 \
         $(grep -v '^#' ../models/gr00t-n17/model.vars | grep -v '^$' | tr '\n' ' ')
 ```
@@ -41,3 +42,12 @@ like `3 7 11` that looks numeric at the front.
 
 Every file here leaves the arm **still**. Driving it is `allow_motion=true`, which is deliberately not in
 any of them.
+
+## The model is not part of a composition
+
+None of these files sets `model=`. An example says which **stages** run; which model runs is an
+orthogonal choice, and the two should not be bundled.
+
+That is not tidiness. When they were bundled, every example run was a GR00T run, so a GR00T-specific
+assertion that had leaked into the shared pipeline passed every time — and survived until a third model
+tripped over it. Pass the model and its `model.vars` explicitly, and vary it.
