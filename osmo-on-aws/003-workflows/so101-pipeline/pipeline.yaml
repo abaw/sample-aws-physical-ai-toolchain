@@ -889,6 +889,74 @@ workflow:
             --interval-s {{ interval_s }} \
             --lang-instruction "{{ lang_instruction }}" \
             --output-dir {{output}} 2>&1 | tee {{output}}/hil_eval.log
+
+          # LINEAGE. Given a HIL result months later, what produced it? The client cannot answer
+          # that: it sees numbered mount points, not URLs, and it does not know which model
+          # directory was selected. So the pipeline writes what only it knows, beside the client's
+          # own results.json, which already records which physical device each camera name
+          # resolved to and whether torque was ever enabled.
+          #
+          # Written AFTER the client so a run that aborted still gets one — the question "what
+          # drove the arm" matters most about the runs that went wrong.
+          python3 - {{output}}/lineage.json <<'PY'
+          import json, pathlib, sys
+          out = pathlib.Path(sys.argv[1])
+          record = {
+              "workflow_id": "{{workflow_id}}",
+              "model": "{{ model }}",
+              # A chained checkpoint has no URL at all: its input is <workflow-id>/<task-name>/.
+              # That is better provenance than a URL, so it is recorded as such rather than blank.
+{% if run_train | string | lower == 'true' %}
+              "checkpoint_source": {"kind": "task", "task": "train-model", "workflow_id": "{{workflow_id}}"},
+{% else %}
+              "checkpoint_source": {"kind": "url", "url": "{{ checkpoint_url }}"},
+{% endif %}
+{% if run_prepare | string | lower == 'true' %}
+              "dataset_source": {"kind": "task", "task": "prepare-dataset", "workflow_id": "{{workflow_id}}"},
+{% else %}
+              "dataset_source": {"kind": "url", "url": "{{ prepared_dataset_url }}"},
+{% endif %}
+              "cameras_requested": "{{ cameras }}",
+              "robot_port": "{{ robot_port }}",
+              "robot_id": "{{ robot_id }}",
+              # Normalised to a real JSON boolean. A YAML `false` renders Python-cased as "False"
+              # while a --set false renders "true"/"false", so the raw value would be a STRING
+              # whose case depends on how it was passed — and "False" is truthy, so a reader
+              # checking `if record["allow_motion"]` on a rehearsal would conclude the arm moved.
+              "allow_motion": "{{ allow_motion }}".strip().lower() == "true",
+              "lang_instruction": "{{ lang_instruction }}",
+              "action_horizon": {{ action_horizon }},
+              "control_hz": {{ control_hz }},
+              "run_duration_s": {{ run_duration_s }},
+              "interval_s": {{ interval_s }},
+              "stages_enabled": {
+                  name: value.strip().lower() == "true"
+                  for name, value in (
+                      ("prepare", "{{ run_prepare }}"), ("train", "{{ run_train }}"),
+                      ("eval", "{{ run_eval }}"), ("hil", "{{ run_hil }}"),
+                  )
+              },
+              # What the client resolved, lifted out of its own output so one file answers the
+              # whole question rather than two that have to be correlated by hand.
+              "resolved": {},
+          }
+          results = out.parent / "results.json"
+          if results.is_file():
+              try:
+                  r = json.loads(results.read_text())
+                  record["resolved"] = {
+                      "cameras": r.get("cameras"),
+                      "torque_released": r.get("summary", {}).get("torque_released", r.get("torque_released")),
+                      "no_motion": r.get("summary", {}).get("no_motion", r.get("no_motion")),
+                  }
+              except ValueError as exc:
+                  record["resolved"] = {"error": f"results.json unreadable: {exc!r}"}
+          else:
+              record["resolved"] = {"error": "results.json absent — the client published nothing"}
+          out.write_text(json.dumps(record, indent=2) + "\n")
+          print("lineage:", json.dumps(record["resolved"]))
+          PY
+
           chmod -R a+rX {{output}}
 {% endif %}
   timeout:
