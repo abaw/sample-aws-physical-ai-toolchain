@@ -558,8 +558,73 @@ workflow:
           [ -n "$(find {{input:0}} -type f -print -quit)" ] \
             || { echo "ERROR: {{input:0}} is empty — check the dataset input" >&2; exit 1; }
           bash /tmp/train.sh "{{input:0}}" "{{output}}" {{ steps }} {{ batch_size }} {{ save_freq }} {{ seed }}
+
+          # A manifest per published artifact. OSMO's uploader logs per-file failures and then
+          # reports success anyway, and this task cannot check its own upload — the uploader runs
+          # after the container exits. So the manifest travels WITH the checkpoint and the scoring
+          # stage verifies its download against it. Without this a truncated 25 GB checkpoint is
+          # indistinguishable from a complete one until a policy predicts at the wrong scale.
+          #
+          # Exit status deferred until after publication: failing here would leave nothing to
+          # diagnose the failure from.
+          MANIFEST_RC=0
+          python3 - {{output}} <<'PY' || MANIFEST_RC=$?
+          import json, pathlib, sys
+
+          out = pathlib.Path(sys.argv[1])
+          checkpoints = sorted(p for p in out.glob("checkpoint-*") if p.is_dir())
+
+          def files_under(root, skip):
+              found = []
+              for p in sorted(root.rglob("*")):
+                  if not p.is_file() or p.name == "manifest.json":
+                      continue
+                  if any(str(p).startswith(str(s) + "/") for s in skip):
+                      continue
+                  found.append(dict(path=str(p.relative_to(root)), bytes=p.stat().st_size))
+              return found
+
+          # Asserted per artifact rather than once for the whole tree: the statistics are
+          # written at start-up, so "somewhere under the output" is true even for a run that
+          # saved no usable checkpoint, and a checkpoint loaded without them predicts at the
+          # wrong scale rather than failing.
+          incomplete = []
+          for root, skip in [(out, checkpoints)] + [(c, []) for c in checkpoints]:
+              name = str(root.relative_to(out)) if root != out else "(final export)"
+              if not (root / "experiment_cfg" / "dataset_statistics.json").is_file():
+                  incomplete.append(name)
+              found = files_under(root, skip)
+              (root / "manifest.json").write_text(
+                  json.dumps(
+                      dict(
+                          file_count=len(found),
+                          total_bytes=sum(f["bytes"] for f in found),
+                          files=found,
+                      ),
+                      indent=2,
+                  )
+                  + "\n"
+              )
+              print("manifest: %s — %d files, %d bytes"
+                    % (name, len(found), sum(f["bytes"] for f in found)))
+
+          if incomplete:
+              print("ERROR: no experiment_cfg/dataset_statistics.json in: %s"
+                    % ", ".join(incomplete), file=sys.stderr)
+              sys.exit(1)
+          PY
+
+          # The task runs as root while the uploading sidecar does not, so anything written via
+          # tempfile is mode 0600 and silently unreadable to it — logged as a per-file error, then
+          # reported as uploaded.
           chmod -R a+rX {{output}}
           echo "published $(find {{output}} -type f | wc -l) files"
+
+          # Now fail, if the manifest found an artifact without its normalisation statistics.
+          if [ "${MANIFEST_RC}" -ne 0 ]; then
+            echo "ERROR: published checkpoint is incomplete; see above" >&2
+            exit "${MANIFEST_RC}"
+          fi
 {% endif %}
 
 {% if run_eval | string | lower == 'true' %}
