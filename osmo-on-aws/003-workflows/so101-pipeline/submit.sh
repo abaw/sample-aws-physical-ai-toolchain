@@ -41,22 +41,45 @@ put() {
   local key="${1%%=*}" value="${1#*=}"
   [ "${key}" = "$1" ] && die "expected key=value, got '$1'"
   [ -z "${key}" ] && die "empty key in '$1'"
-  # A later assignment wins, and the key keeps its first position so the printed command reads in
-  # the order a user wrote it.
+  # A later assignment wins; the key keeps the position it was first seen at. Values sourced from a
+  # file arrive in the shell's own (alphabetical) name order rather than the file's, which is
+  # cosmetic — it only affects how the printed command reads.
   [ -n "${VALUES[$key]+set}" ] || ORDER+=("${key}")
   VALUES["${key}"]="${value}"
 }
 
 load_vars() {
-  local file="$1"
+  # The files are SHELL, so `traj_ids="3 7 11"` means what a reader expects and quoting is explicit
+  # rather than a rule in a README. They are therefore *executed*, not parsed — which is fine for a
+  # file in this repo that a user edits, and is how .env-style config is conventionally handled, but
+  # it does mean a variables file can run commands. Treat one like any other script you source.
+  #
+  # Sourced in a clean subshell rather than here, so a file cannot clobber this script's own
+  # variables — a `SPEC=` line in someone's example would otherwise redirect the submission
+  # silently. The name list is diffed across the source so the file's OWN assignments are known,
+  # which keeps the typo check working for files and not just for the command line.
+  local file="$1" line
   [ -f "${file}" ] || die "no such file: ${file}"
-  local line
-  while IFS= read -r line || [ -n "${line}" ]; do
-    line="${line%%#*}"
-    line="$(printf '%s' "${line}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    [ -z "${line}" ] && continue
-    put "${line}"
-  done < "${file}"
+  while IFS= read -r line; do
+    [ -n "${line}" ] && put "${line}"
+  done < <(
+    env -i "$(command -v bash)" --noprofile --norc -c '
+      before=" $(compgen -v | tr "\n" " ") "
+      set -a
+      # shellcheck disable=SC1090
+      . "$1"
+      set +a
+      for name in $(compgen -v); do
+        case "${before}" in *" ${name} "*) continue ;; esac
+        # Bash materialises some of its own variables only after the first command runs, so they
+        # show up in the diff and would be reported as unknown keys. Excluded by name.
+        case "${name}" in
+          before|name|_|PWD|SHLVL|OLDPWD|PIPESTATUS|LINENO|RANDOM|SECONDS|FUNCNAME|BASH*|COMP*|EPOCH*|HISTCMD|SRANDOM) continue ;;
+        esac
+        printf "%s=%s\n" "${name}" "${!name}"
+      done
+    ' _ "${file}"
+  ) || die "failed to read ${file}"
 }
 
 while [ $# -gt 0 ]; do

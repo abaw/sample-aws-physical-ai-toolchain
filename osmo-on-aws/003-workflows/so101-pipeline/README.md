@@ -16,8 +16,9 @@ That runs prepare → train → eval → a HIL **rehearsal**. The arm does not m
 
 `submit.sh` assembles the `--set` arguments, checks every key against the spec's own `default-values` so a
 typo is refused rather than ignored, and prints the exact `osmo workflow submit` it runs. `--dry-run`
-passes through. Everything it does can be done by hand; `examples/README.md` says what goes wrong when it
-is.
+passes through. The `examples/*.vars` files are plain shell assignments — `traj_ids="3 7 11"` — so the
+format needs no explaining and quoting is explicit. Everything the helper does can be done by hand;
+`examples/README.md` says what goes wrong when it is.
 
 | Stage | Needs a GPU | Needs the robot | Publishes |
 |---|:---:|:---:|---|

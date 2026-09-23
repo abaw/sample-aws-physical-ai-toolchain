@@ -17,6 +17,26 @@ in the way.
 Everything is `key=value`, in any order, and a value given on the command line beats the same key in a
 file. Spaces and globs are safe, because these are ordinary shell arguments.
 
+## The files are shell
+
+```sh
+run_prepare="true"
+traj_ids="3 7 11"
+exec_timeout="24h"
+```
+
+Shell assignment syntax, because it is a format every user already knows and it makes quoting explicit
+rather than a rule buried in a README. Comments, blank lines and `$HOME` all behave as you would expect.
+
+**They are therefore executed, not parsed.** That is how `.env`-style config is conventionally handled and
+is fine for a file in this repo that you edit — but a variables file can run commands, so treat one you
+did not write like any other script you would source.
+
+`submit.sh` sources them in an isolated subshell, so a file cannot reach the script's own variables: a
+stray `SPEC=` line is reported as an undeclared key rather than silently redirecting your submission to a
+different spec. It also diffs the variable names across the source, so a typo *inside a file* is caught
+the same as one on the command line.
+
 ## What the helper is protecting you from
 
 Assembling this by hand is possible and was what the first version of these docs told you to do. Three
