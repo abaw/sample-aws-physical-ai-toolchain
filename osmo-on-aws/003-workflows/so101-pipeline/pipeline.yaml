@@ -12,7 +12,7 @@ version: 2
 #      This spec never names a
 #      model. Adding one is a new directory implementing the same five filenames.
 #
-# The contract a model directory must satisfy — eleven files, and every one must EXIST:
+# The contract a model directory must satisfy — twelve files, and every one must EXIST:
 #
 #   models/<name>/install.sh           $1 stage (prepare|train|eval|serve); SOURCED, not executed
 #   models/<name>/prepare.sh           $1 dataset-in   $2 dir-out
@@ -25,6 +25,7 @@ version: 2
 #   models/<name>/train_lib.py         train          MAY BE EMPTY
 #   models/<name>/score_lib.py         eval           MAY BE EMPTY
 #   models/<name>/serve_lib.py         hil            MAY BE EMPTY
+#   models/<name>/transport.py         BOTH hil tasks MAY BE EMPTY
 #
 # WHY THE HELPER SLOTS EXIST, AND WHY THEY ARE MANDATORY. A real model does not fit in five
 # shell scripts: one of the two here needs ~300 lines of Python beside its stage scripts.
@@ -746,6 +747,12 @@ workflow:
         path: /tmp/common.py
       - localpath: models/{{ model }}/serve_lib.py
         path: /tmp/serve_lib.py
+      # The transport, injected into BOTH ends of this group because it IS one thing with two
+      # ends: a server and client disagreeing about the wire is the failure contract B exists to
+      # prevent, and two slots would invite exactly that drift. May be empty — a model whose
+      # transport is an installable package provides it in client_transport.sh instead.
+      - localpath: models/{{ model }}/transport.py
+        path: /tmp/transport.py
       command: [bash, -c]
       args:
         - |
@@ -786,6 +793,9 @@ workflow:
       # The transport IS the model's choice, so it comes from the model directory.
       - localpath: models/{{ model }}/client_transport.sh
         path: /tmp/client_transport.sh
+      # The same transport file the server got. See the note on the server task.
+      - localpath: models/{{ model }}/transport.py
+        path: /tmp/transport.py
 {% if calibration_localpath %}
       - localpath: {{ calibration_localpath }}
         path: /tmp/calibration/{{ robot_id }}.json
@@ -812,6 +822,9 @@ workflow:
             "msgpack-numpy=={{ msgpack_numpy_version }}"
 
           # Whatever transport this model's server speaks, plus TRANSPORT_MODULE. Sourced.
+          # PYTHONPATH so a transport supplied as the slot file resolves; a model whose transport
+          # is an installed package does not need it and is unaffected.
+          export PYTHONPATH="/tmp${PYTHONPATH:+:${PYTHONPATH}}"
           source /tmp/client_transport.sh
 
           # Conditional flags go into arrays rather than into the command's own backslash
