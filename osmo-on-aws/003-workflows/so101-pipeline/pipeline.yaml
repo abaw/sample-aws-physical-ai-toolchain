@@ -406,11 +406,17 @@ workflow:
             esac
             # Each pair, not just "contains an =". A name with a dot would make dataset-key
             # suffix resolution ambiguous; a comma or equals breaks the encoding itself.
+            #
+            # The NAME is checked here; the SPEC deliberately is NOT. A spec may be a selector
+            # resolved on the machine, a device node, an OpenCV index, a video file or a URL, and
+            # re-validating it here would narrow what the client already accepts — which is how
+            # the /dev/videoN assumption got in. The client resolves it and refuses a spec
+            # matching zero devices or more than one, before torque.
             seen=""
-            for pair in $(echo "{{ cameras }}" | tr ',' ' '); do
+            for pair in $(echo "{{ cameras }}" | tr ';' ' '); do
               case "${pair}" in
-                *=/dev/*) ;;
-                *) echo "ERROR: camera '${pair}' is not <name>=/dev/<device>" >&2; fail=1; continue ;;
+                *=*) ;;
+                *) echo "ERROR: camera '${pair}' is not <name>=<spec>" >&2; fail=1; continue ;;
               esac
               cname="${pair%%=*}"
               case "${cname}" in
@@ -749,7 +755,11 @@ workflow:
           # Camera NAMES only. This node has no cameras attached, so a device path here would
           # be meaningless; the server needs the names solely to refuse a rig the checkpoint
           # was not trained on.
-          CAMERA_NAMES="$(echo "{{ cameras }}" | tr ',' '\n' | cut -d= -f1 | paste -sd, -)"
+          # ';' between cameras, ',' between the NAMES on the way out — the server's flag takes a
+          # comma-separated list. Getting this separator wrong extracts one name from the whole
+          # string and the server then refuses the rig, which is the check working rather than a
+          # false alarm.
+          CAMERA_NAMES="$(echo "{{ cameras }}" | tr ';' '\n' | cut -d= -f1 | paste -sd, -)"
           echo "camera names for the server: ${CAMERA_NAMES}"
           bash /tmp/serve.sh "{{input:0}}" "{{input:1}}" {{ policy_port }} "${CAMERA_NAMES}"
 
