@@ -19,18 +19,18 @@ SEED="${6:?train.sh needs a seed}"
 
 echo "[gr00t-n17] train: steps=${STEPS} batch=${BATCH} save_freq=${SAVE_FREQ} seed=${SEED}"
 
-# THE SEED CANNOT BE HONOURED. GR00T's FinetuneConfig is a curated dataclass with no seed field,
-# so its launcher rejects --seed outright rather than forwarding it to the underlying trainer.
-# Setting PYTHONHASHSEED is all that is reachable from here, and it governs hash randomisation
-# only -- not weight initialisation, not data order, not sampling.
+# THE SEED IS FIXED, NOT ABSENT. GR00T does seed its training: it calls set_seed() and passes
+# the value into TrainingArguments. But the value comes from DataConfig.seed, whose default is
+# 42, and the curated FinetuneConfig this launcher exposes over tyro has no seed field and does
+# not copy one onto the data config. So runs here ARE repeatable to the extent the rest of the
+# stack is; they are just repeatable at 42, and this launcher offers no way to ask for another.
 #
-# Said loudly rather than ignored quietly: the contract allows a script to ignore an argument it
-# cannot use, but a seed is a promise of reproducibility, and someone passing seed=1000 and
-# getting a different model each time deserves to have been told. The same non-reproducibility
-# shows up at scoring time, where repeated runs of one checkpoint spread MSE by ~35%.
+# Said out loud rather than ignored quietly. The contract lets a script ignore an argument it
+# cannot use, but a seed is a promise of reproducibility, and someone passing a seed and getting
+# the same run regardless deserves to know which of the two is happening.
 export PYTHONHASHSEED="${SEED}"
-echo "[gr00t-n17] WARNING: this launcher exposes no seed, so ${SEED} cannot make the run" >&2
-echo "[gr00t-n17]          reproducible. PYTHONHASHSEED is set; nothing else is seedable." >&2
+echo "[gr00t-n17] NOTE: this launcher does not expose a seed. Training is seeded at GR00T's" >&2
+echo "[gr00t-n17]       own fixed default (42), so ${SEED} has no effect on the result." >&2
 
 # GR00T's launcher refuses a pre-existing output directory, so the pipeline removes rather
 # than creates it; assert that here rather than discovering it inside the launcher.
