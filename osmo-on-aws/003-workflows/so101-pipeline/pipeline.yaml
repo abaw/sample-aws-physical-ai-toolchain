@@ -591,15 +591,17 @@ workflow:
                   found.append(dict(path=str(p.relative_to(root)), bytes=p.stat().st_size))
               return found
 
-          # Asserted per artifact rather than once for the whole tree: the statistics are
-          # written at start-up, so "somewhere under the output" is true even for a run that
-          # saved no usable checkpoint, and a checkpoint loaded without them predicts at the
-          # wrong scale rather than failing.
-          incomplete = []
+          # A manifest per artifact rather than one for the whole tree, because a run can publish
+          # a final export and several checkpoints and each is downloaded independently.
+          # DELIBERATELY NOT "is this checkpoint usable". An earlier version asserted a file
+          # from one model's checkpoint layout here — experiment_cfg/dataset_statistics.json —
+          # which is model-specific logic in a model-independent task, and it failed every
+          # LeRobot-native model. The manifest's job is WHAT WAS PUBLISHED AND HOW BIG, which is
+          # the only question the pipeline can answer about any model's artifact. Whether a
+          # checkpoint is loadable is the model's question, and each model's score.sh and serve.sh
+          # already refuse an incomplete one by name before loading it.
           for root, skip in [(out, checkpoints)] + [(c, []) for c in checkpoints]:
               name = str(root.relative_to(out)) if root != out else "(final export)"
-              if not (root / "experiment_cfg" / "dataset_statistics.json").is_file():
-                  incomplete.append(name)
               found = files_under(root, skip)
               (root / "manifest.json").write_text(
                   json.dumps(
@@ -615,9 +617,8 @@ workflow:
               print("manifest: %s — %d files, %d bytes"
                     % (name, len(found), sum(f["bytes"] for f in found)))
 
-          if incomplete:
-              print("ERROR: no experiment_cfg/dataset_statistics.json in: %s"
-                    % ", ".join(incomplete), file=sys.stderr)
+          if not checkpoints and not files_under(out, []):
+              print("ERROR: the training stage published nothing at all", file=sys.stderr)
               sys.exit(1)
           PY
 
