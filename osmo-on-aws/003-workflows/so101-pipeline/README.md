@@ -4,18 +4,20 @@ Fine-tune a vision-language-action model on your own SO-101 recordings, score it
 hardware, and close the loop on the real arm — **one OSMO spec, four switchable stages**.
 
 ```bash
-B=s3://<your-bucket>/so101
-
-osmo workflow submit pipeline.yaml \
-  --set $(grep -v '^#' examples/full-chain.vars | grep -v '^$' | tr '\n' ' ') \
-        storage_url=$B source_dataset_url=$B/raw/<name>/ dataset_name=<name> \
-        $(grep -v '^#' models/gr00t-n17/model.vars | grep -v '^$' | tr '\n' ' ') \
-  --set-string traj_ids="3 7 11" \
-               lang_instruction="<the task text your dataset was annotated with>"
+./submit.sh --example full-chain --model gr00t-n17 \
+    storage_url=s3://<your-bucket>/so101 \
+    source_dataset_url=s3://<your-bucket>/raw/<name>/ \
+    dataset_name=<name> \
+    lang_instruction="<the task text your dataset was annotated with>"
 ```
 
 That runs prepare → train → eval → a HIL **rehearsal**. The arm does not move until you add
 `allow_motion=true`.
+
+`submit.sh` assembles the `--set` arguments, checks every key against the spec's own `default-values` so a
+typo is refused rather than ignored, and prints the exact `osmo workflow submit` it runs. `--dry-run`
+passes through. Everything it does can be done by hand; `examples/README.md` says what goes wrong when it
+is.
 
 | Stage | Needs a GPU | Needs the robot | Publishes |
 |---|:---:|:---:|---|
@@ -148,11 +150,14 @@ single runs measures noise. Whether a policy *performs the task* is settled by w
 
 ## Gotchas that cost a run each
 
+Most of these are what `submit.sh` exists to prevent; they bite when you assemble `--set` by hand.
+
 | Symptom | Cause |
 |---|---|
-| Submit fails with `NoSuchBucket` against `REPLACE-WITH-…` | `--set` was repeated. It is not additive: only the last group applies. One `--set`, always |
-| `Data 7 is incorrectly formatted` | a space-containing value went through the `.vars` expansion, which word-splits. Pass those with `--set-string`, quoted |
-| A flag you set is absent from preflight's echo | you mistyped the key. `--set` accepts unknown keys silently, and nothing else will tell you |
+| Submit fails with `NoSuchBucket` against `REPLACE-WITH-…` | `--set` was repeated. It is not additive: only the last group applies. `submit.sh` emits one of each flag |
+| `Data 7 is incorrectly formatted` | a space-containing value was word-split by a shell expansion. `submit.sh` passes values as arguments, so spaces and globs are safe |
+| A flag you set is absent from preflight's echo | you mistyped the key. `--set` accepts unknown keys silently; `submit.sh` refuses one the spec does not declare, which is the one check the platform cannot do for you |
+| A trajectory list arrived as just its first number | `--set` coerces to int/float. `submit.sh` routes non-numeric values to `--set-string` |
 | `500 Internal server error: Unknown URI scheme:` at submit | an input URL rendered empty. Defaults are placeholder buckets rather than `""` for this reason |
 | A stage fails while the next one completes | a guard that is not an `inputs: - task:` edge is decorative. Failure propagates along edges, never along group order |
 | HIL completes and the arm never moved | `allow_motion` was left false. Confirm with `no_motion` in `results.json` |

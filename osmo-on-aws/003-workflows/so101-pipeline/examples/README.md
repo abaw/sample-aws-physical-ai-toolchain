@@ -1,53 +1,44 @@
 # Ready-to-run variable sets
 
-Each file is a list of `key=value` lines. Expand one into a single `--set`:
+Pick one and hand it to `submit.sh`:
 
 ```bash
-osmo workflow submit ../pipeline.yaml \
-  --set $(grep -v '^#' full-chain.vars | grep -v '^$' | tr '\n' ' ') \
-        model=gr00t-n17 \
-        storage_url=s3://<your-bucket>/so101 \
-        $(grep -v '^#' ../models/gr00t-n17/model.vars | grep -v '^$' | tr '\n' ' ')
+../submit.sh --example full-chain --model gr00t-n17 \
+    storage_url=s3://<your-bucket>/so101 \
+    source_dataset_url=s3://<your-bucket>/raw/<name>/ \
+    dataset_name=<name> \
+    lang_instruction="<the task text your dataset was annotated with>"
 ```
 
-**One `--set`, always.** The flag takes many values but is not additive: repeating it keeps only the last
-group, silently, and the run proceeds on placeholder defaults. Preflight echoes every resolved value for
-exactly this reason — if something you passed is missing from that list, you mistyped the key.
+Add `--dry-run` to see the rendered spec without consuming a node. The helper prints the exact
+`osmo workflow submit` it runs, so nothing is hidden and the command can be copied if the helper is ever
+in the way.
 
-`osmo workflow submit ... --dry-run` prints the rendered spec without consuming a node.
+Everything is `key=value`, in any order, and a value given on the command line beats the same key in a
+file. Spaces and globs are safe, because these are ordinary shell arguments.
 
-## These files hold only shell-safe values, and that is a rule not an accident
+## What the helper is protecting you from
 
-The expansion above is word-splitting, so **a value containing a space cannot live in one of these
-files.** `traj_ids=3 7 11` becomes three arguments and the submit fails with
-`Data 7 is incorrectly formatted` — which names the fragment, not the variable, so it reads like a
-mystery. A value containing `*` is worse: the shell globs it against your working directory before OSMO
-ever sees it.
+Assembling this by hand is possible and was what the first version of these docs told you to do. Three
+things went wrong with that often enough to be worth a script:
 
-So anything with a space or a shell metacharacter is passed on the command line, quoted:
-
-```bash
-osmo workflow submit ../pipeline.yaml \
-  --set $(grep -v '^#' full-chain.vars | grep -v '^$' | tr '\n' ' ') \
-        storage_url=s3://<your-bucket>/so101 \
-        source_dataset_url=s3://<your-bucket>/raw/<name>/ \
-        dataset_name=<name> \
-  --set-string traj_ids="3 7 11" \
-               lang_instruction="<the task text your dataset was annotated with>" \
-               cameras="front=sysfs:*/3-5.1/*;wrist=sysfs:*/3-1/*"
-```
-
-`--set-string` for those three: it skips the int/float coercion `--set` applies, which matters for a value
-like `3 7 11` that looks numeric at the front.
-
-Every file here leaves the arm **still**. Driving it is `allow_motion=true`, which is deliberately not in
-any of them.
+- **`--set` accepts keys nothing references, silently.** `run_trian=false` does nothing, the run proceeds
+  on the default, and it looks healthy. The helper checks every key against the spec's own
+  `default-values` and refuses an unknown one. **The platform cannot do this for you.**
+- **Which flag a value needs is not obvious.** `--set` coerces to int/float, which the spec depends on —
+  a storage figure is computed arithmetically — but a trajectory list like `3 7 11` coerced that way
+  keeps only the `3`. The helper routes numerics to `--set` and everything else to `--set-string`.
+- **Repeating `--set` is not additive.** Only the last group applies, silently, and the run proceeds on
+  placeholder defaults. The helper emits exactly one of each flag.
 
 ## The model is not part of a composition
 
-None of these files sets `model=`. An example says which **stages** run; which model runs is an
-orthogonal choice, and the two should not be bundled.
+None of these files sets `model=`. An example says which **stages** run; which model runs is orthogonal,
+and the two should not be bundled — `--model` is a separate argument for that reason.
 
-That is not tidiness. When they were bundled, every example run was a GR00T run, so a GR00T-specific
-assertion that had leaked into the shared pipeline passed every time — and survived until a third model
-tripped over it. Pass the model and its `model.vars` explicitly, and vary it.
+That is not tidiness. When they were bundled, every example run was a single-model run, so a
+model-specific assertion that had leaked into the shared pipeline passed every time, and it survived
+until a third model tripped over it.
+
+Every file here leaves the arm **still**. Driving it is `allow_motion=true`, which is deliberately in
+none of them.
