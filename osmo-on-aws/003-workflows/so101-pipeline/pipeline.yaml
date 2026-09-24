@@ -11,8 +11,8 @@ version: 2
 #   ./submit.sh --example full-chain --model gr00t-n17 storage_url=s3://... dataset_name=...
 #
 # README.md covers usage, adding a model, the robot half, and how to read a result.
-# CONTRACT.md is what a model directory must provide. SO101_POLICY_INTERFACE.md is the arm's
-# own interface to a policy server, which this spec passes arguments to and does not define.
+# docs/CONTRACT.md is what a model directory must provide. docs/SO101_POLICY_INTERFACE.md is the
+# arm's own interface to a policy server, which this spec passes arguments to and does not define.
 #
 # THE ARM MOVES ONLY WITH allow_motion=true.
 #
@@ -439,7 +439,7 @@ workflow:
       # A payload that declares itself a template is rendered by OSMO's server-side pass,
       # whose scope is --set values ONLY — default-values are invisible to it. So a payload
       # referencing a workflow variable makes that variable mandatory --set input forever.
-      # OSMO's own tokens are always in scope and are the safe case. See CONTRACT.md.
+      # OSMO's own tokens are always in scope and are the safe case. See docs/CONTRACT.md.
       - localpath: models/{{ model }}/prepare.sh
         path: /tmp/prepare.sh
       # Helper slots. Mandatory, may be empty; they land beside the script so a plain

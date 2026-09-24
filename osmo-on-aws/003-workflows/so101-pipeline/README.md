@@ -69,7 +69,7 @@ directory, the other passes dotted CLI flags — which is why the contract is fi
 script receives every argument whether it uses it or not: ignoring one is free, being unable to see one is
 a contract change.
 
-`docs/CONTRACT.md` in the tracker has the obligations behind each file.
+[`docs/CONTRACT.md`](docs/CONTRACT.md) has the obligations behind each file.
 
 ## "Model-agnostic" means something narrower than it sounds
 
@@ -78,7 +78,7 @@ irrespective of the robot. A policy server must speak whatever interface the tar
 **the workflow cannot detect a missing adapter** — it will happily start a server that speaks nothing the
 client understands, and the symptom is a client timing out.
 
-For this arm that interface is `eval_so101_bounded.py`'s, and writing an adapter for it was ~380 lines for
+For this arm that interface is [`docs/SO101_POLICY_INTERFACE.md`](docs/SO101_POLICY_INTERFACE.md), and writing an adapter for it was ~380 lines for
 one of these models and a thin wrapper for the other. That is the cost of adding a model to a *robot*, as
 distinct from adding one to the *workflow*.
 
