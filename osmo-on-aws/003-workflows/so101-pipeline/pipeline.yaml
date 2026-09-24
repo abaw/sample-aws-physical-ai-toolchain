@@ -1,68 +1,39 @@
 version: 2
-# One spec, four composable stages, any model, one SO-101 arm. Three mechanisms carry it, all verified by
-# running them rather than by reading docs:
+# Fine-tune a vision-language-action model on SO-101 recordings, score it, and drive the arm.
+# Four stages in one spec, each switched on or off by its own flag:
 #
-#   1. STAGES ARE GROUPS. OSMO runs groups serially and tasks within a group in parallel, so
-#      a stage is a group and a conditional block around one includes or omits it.
-#   2. CHAINING IS NATIVE. `inputs: - task: <name>` wires a later group from an earlier
-#      task's output, no S3 URL in between. Note it round-trips through S3 rather than
-#      sharing a volume, so a chain is fewer commands, not less transfer.
-#   3. THE MODEL AXIS NEEDS NO CONDITIONALS. Jinja renders inside `files: localpath:`, so
-#      a localpath of models/<the model variable>/train.sh selects per-model code by path.
-#      This spec never names a
-#      model. Adding one is a new directory implementing the same five filenames.
+#   prepare  convert a recording into the model's format   -> dataset/<model>/<dataset_name>/
+#   train    fine-tune                                     -> checkpoints/<model>/<workflow-id>/
+#   eval     score offline; the stop/go gate               -> eval/<model>/<workflow-id>/
+#   hil      drive the physical arm                        -> hil/<model>/<workflow-id>/
 #
-# The contract a model directory must satisfy — twelve files, and every one must EXIST:
+# Submitting: use ./submit.sh, which assembles the --set arguments and refuses a mistyped key.
+#   ./submit.sh --example full-chain --model gr00t-n17 storage_url=s3://... dataset_name=...
 #
-#   models/<name>/install.sh           $1 stage (prepare|train|eval|serve); SOURCED, not executed
-#   models/<name>/prepare.sh           $1 dataset-in   $2 dir-out
-#   models/<name>/train.sh             $1 dataset      $2 dir-out   $3 steps  $4 batch  $5 save-freq  $6 seed
-#   models/<name>/score.sh             $1 checkpoint   $2 dataset   $3 dir-out  $4 traj-ids  $5 horizon  $6 steps
-#   models/<name>/serve.sh             $1 checkpoint   $2 dataset   $3 port   $4 camera-names
-#   models/<name>/client_transport.sh  SOURCED by the robot task; exports TRANSPORT_MODULE
-#   models/<name>/common.py            every stage    MAY BE EMPTY
-#   models/<name>/prepare_lib.py       prepare        MAY BE EMPTY
-#   models/<name>/train_lib.py         train          MAY BE EMPTY
-#   models/<name>/score_lib.py         eval           MAY BE EMPTY
-#   models/<name>/serve_lib.py         hil            MAY BE EMPTY
-#   models/<name>/transport.py         BOTH hil tasks MAY BE EMPTY
+# README.md covers usage, adding a model, the robot half, and how to read a result.
+# CONTRACT.md is what a model directory must provide. SO101_POLICY_INTERFACE.md is the arm's
+# own interface to a policy server, which this spec passes arguments to and does not define.
 #
-# WHY THE HELPER SLOTS EXIST, AND WHY THEY ARE MANDATORY. A real model does not fit in five
-# shell scripts: one of the two here needs ~300 lines of Python beside its stage scripts.
-# Injecting a whole directory is not possible — `localpath: <dir>` fails at validate with
-# IsADirectoryError — so the alternative was each model writing its helpers out as bash
-# heredocs, which puts hundreds of lines of Python inside a Jinja-rendered payload where a
-# stray brace corrupts it silently. Fixed slots instead. They are mandatory because a MISSING
-# localpath fails at validate naming the path, which is a good failure, while an EMPTY one
-# validates fine — so a model that needs no helper ships an empty file and pays nothing.
-# Crucially this adds NO conditionals: the model axis stays branch-free.
+# THE ARM MOVES ONLY WITH allow_motion=true.
 #
-# The transport slot exists because the bytes between client and server are the MODEL's choice
-# (see SO101_POLICY_INTERFACE.md). Without it the robot task would install one model's package
-# to drive every model.
+# A model is a directory under models/, selected by templating the path its scripts are injected
+# from, so this spec never names one. Each directory provides twelve files; the helper slots may
+# be empty but must exist, or the submit fails at validate naming the missing path:
 #
-# See CONTRACT.md for the obligations behind each of those — and note the scope boundary it
-# opens with: the workflow-to-model contract is CONTRACT.md, while the robot-to-policy-server
-# interface belongs to the ROBOT and lives in SO101_POLICY_INTERFACE.md. This spec passes each
-# side the arguments it owns and does not define or validate what they say to each other. The principle: THE PIPELINE PASSES
-# WHAT IT OWNS, THE MODEL OWNS EVERYTHING ELSE. The two real launchers share no flag vocabulary
-# — one takes environment variables and positional flags to a shell script after changing
-# directory, the other takes dotted CLI flags — so the contract is filenames, not flags. Every
-# script receives every argument whether it uses it or not: ignoring one is free, being unable
-# to see one is a contract change.
+#   install.sh           SOURCED by every stage. $1 stage (prepare|train|eval|serve)
+#   prepare.sh           $1 dataset-in   $2 dir-out
+#   train.sh             $1 dataset  $2 dir-out  $3 steps  $4 batch  $5 save-freq  $6 seed
+#   score.sh             $1 ckpt  $2 dataset  $3 dir-out  $4 traj-ids  $5 horizon  $6 steps
+#   serve.sh             $1 ckpt  $2 dataset  $3 port  $4 camera-names
+#   client_transport.sh  SOURCED by the robot task; exports TRANSPORT_MODULE
+#   common.py            injected into every stage        may be empty
+#   prepare_lib.py       injected into prepare            may be empty
+#   train_lib.py         injected into train              may be empty
+#   score_lib.py         injected into eval               may be empty
+#   serve_lib.py         injected into hil                may be empty
+#   transport.py         injected into both hil tasks     may be empty
 #
-# install.sh takes the STAGE so a model can install less for a cheap one. Converting parquet
-# does not need a training toolchain, and one real model's install is a git clone plus git-lfs
-# pull plus a dependency resolve.
-#
-# WHY THERE IS A PREFLIGHT STAGE. `--set` silently ignores keys nothing references, and a
-# guard that lowercases a value and compares it to 'true' maps anything unrecognised to false.
-# So `--set run_trian=false` does nothing and `--set run_train=maybe` quietly skips training
-# — either way a run looks healthy and does the wrong thing. Preflight runs first, asserts
-# every flag is a real boolean, checks every required URL, and echoes the resolved
-# configuration so the log records what was actually going to happen. It cannot catch a
-# typo'd key (OSMO exposes no hook for that), which is why it echoes: a reader can see that
-# a flag they set is missing from the list.
+# Each script receives every argument whether it uses it or not.
 default-values:
   # --- composition -----------------------------------------------------------
   # Which stages to run. Must be exactly `true` or `false`; preflight rejects anything else
@@ -86,32 +57,26 @@ default-values:
   storage_url: s3://REPLACE-WITH-YOUR-DATASETS-BUCKET/model-agnostic
   # Names the converted tree. Distinct per recording, NOT per run — see the prepare outputs.
   dataset_name: REPLACE-WITH-YOUR-DATASET-NAME
-  # These are DNS-valid placeholder buckets, not empty strings, on purpose. An empty value
-  # renders `- url: ""`, which OSMO rejects at SUBMIT with
-  # `500 Internal server error: Unknown URI scheme:` — before preflight can run, and before
-  # any message naming the variable. A placeholder bucket instead fails at input download with
-  # `NoSuchBucket`, which names the URL and is what the shipped READMEs already document.
+  # source_dataset_url    set when run_prepare is true
+  # prepared_dataset_url  set when a stage consumes a dataset and run_prepare is false
+  # checkpoint_url        set when a stage consumes a checkpoint and run_train is false
   #
-  # Named for direction rather than for lifecycle stage: the shipped so101-vla README uses
-  # `dataset_url` for the RAW input, so reusing that name for the prepared tree would invert
-  # a reader's muscle memory.
-  #
-  # source_dataset_url    needed when run_prepare is true
-  # prepared_dataset_url  needed when a stage consumes a dataset and run_prepare is false
-  # checkpoint_url        needed when a stage consumes a checkpoint and run_train is false
+  # Leave these as placeholder buckets rather than blanking them: an empty URL is rejected at
+  # submit with `Unknown URI scheme:` and no variable name, whereas a placeholder fails at
+  # download with `NoSuchBucket` and the URL in the message.
   source_dataset_url: s3://replace-with-your-raw-dataset-bucket/
   prepared_dataset_url: s3://replace-with-your-prepared-dataset-bucket/
   checkpoint_url: s3://replace-with-your-checkpoint-bucket/
 
-  # --- what a run owns, for any model ----------------------------------------
-  # Everything a user of ANY model wants to set. Model-specific knobs — learning rate, dtype,
-  # gradient checkpointing, GPU count, embodiment tag, denoising steps — belong to the model
-  # and live in its scripts or its models/<name>/model.vars, never here.
+  # --- the run ---------------------------------------------------------------
+  # Model-specific knobs — learning rate, dtype, GPU count, embodiment tag, denoising steps —
+  # are not here. They live in the model's own scripts or its models/<name>/model.vars.
   steps: 20000
   batch_size: 4
   save_freq: 5000
   seed: 1000
-  # Scoring: several trajectories, because one lucky trajectory is not convergence.
+  # Use several trajectories; one is not evidence of convergence. Space-separated episode
+  # indices, ideally ones the fine-tune did not train on.
   traj_ids: "3 7 11"
   execution_horizon: 16
   max_steps: 400
@@ -128,9 +93,8 @@ default-values:
   #   for d in /sys/class/video4linux/*; do echo "$d $(cat $d/name)"; readlink -f $d; done
   cameras: "front=sysfs:*/3-5.1/*;wrist=sysfs:*/3-1/*"
   robot_port: /dev/ttyACM0
-  # Defaults FALSE, and reads the way it behaves: the arm moves only if you pass
-  # allow_motion=true. The previous spelling was a double negative — arming the robot read as
-  # `no_motion=false` — which is how a run believed to be powered once moved nothing.
+  # THE ARM MOVES ONLY IF THIS IS true. Left false, the hil stage runs everything —
+  # gang-scheduling, camera resolution, the observation round trip — and never enables torque.
   allow_motion: false
   lang_instruction: REPLACE-WITH-YOUR-TASK-DESCRIPTION
 
@@ -141,9 +105,8 @@ default-values:
   expected_state_dim: 6
 
   # --- the robot's safety envelope ------------------------------------------
-  # Properties of the ARM, not of a run and not of a model: no model chooses any of these. The
-  # client defaults every one, and they are surfaced here anyway because the whole point of an
-  # e-stop-adjacent limit is that it stays reachable.
+  # Properties of the arm. No model chooses any of these. The client defaults all of them; they
+  # are surfaced here so they can be tuned for a different arm without editing the client.
   # --- safety ---------------------------------------------------------------
   # Rehearsal mode: everything runs, including the policy and the full control loop, and
   # every action is logged — but torque is never enabled and nothing is sent. Run this
@@ -241,23 +204,19 @@ default-values:
   # --- machines --------------------------------------------------------------
   gpu_platform: l40s
   robot_platform: so101-edge
-  # Preflight and dataset conversion need no accelerator. Pointed at the GPU platform only
-  # because this deployment has no CPU-only platform with spare capacity; set it if yours does,
-  # so a 250Gi conversion does not hold the pool's only card.
+  # Preflight and dataset conversion need no accelerator. Point this at a CPU-only platform if
+  # your pool has one, so a large conversion does not hold a GPU.
   cpu_platform: l40s
   policy_port: 5555
-  # WORKFLOW-level, not per stage: composing four stages into one submission replaces four
-  # separate budgets with this single number, and a task killed by its timeout publishes
-  # NOTHING. Size it for the whole chain you enabled, not for one stage. Measured on the two
-  # real pipelines: prepare ~2-15 min, train 4-17 h depending on step count, eval ~6 min,
-  # HIL minutes. A full chain with a real training run wants 24h, not this default.
+  # Covers the WHOLE submission, not one stage, and a task killed by its timeout publishes
+  # nothing. Rough figures: prepare 2-15 min, train 4-17 h by step count, eval ~6 min, hil
+  # minutes. A full chain with a real training run wants 24h.
   exec_timeout: 4h
 
 workflow:
   name: so101-pipeline
   resources:
-    # Deliberately one resource per shape rather than per stage: a stage's needs follow from
-    # what it does, and duplicating them per stage is how they drift.
+    # One entry per shape of work, not per stage; several stages share a shape.
     cpu_small:
       platform: "{{ cpu_platform }}"
       cpu: 1
@@ -347,8 +306,7 @@ workflow:
             esac
           done
 
-          # Scheme and placeholder checks on CONTENT. Emptiness is not worth checking: an
-          # empty URL is rejected at submit, so this task would never start to complain.
+          # Checks each URL's scheme and rejects a leftover placeholder.
           check_url() {
             local name="$1" value="$2"
             case "${value}" in
@@ -363,9 +321,8 @@ workflow:
           }
 
           check_url storage_url "{{ storage_url }}" || fail=1
-          # Only the prepare stage uses dataset_name — it names that stage's output prefix.
-          # Demanding it when prepare is switched off would block the eval-alone and HIL-alone
-          # paths, which are two of the three compositions this spec exists to support.
+          # dataset_name names the prepare stage's output prefix, so it is required only when
+          # that stage runs.
 {% if run_prepare | string | lower == 'true' %}
           case "{{ dataset_name }}" in
             *REPLACE-WITH-*) echo "ERROR: dataset_name is still a placeholder, and run_prepare is true" >&2; fail=1 ;;
@@ -408,11 +365,9 @@ workflow:
             # Each pair, not just "contains an =". A name with a dot would make dataset-key
             # suffix resolution ambiguous; a comma or equals breaks the encoding itself.
             #
-            # The NAME is checked here; the SPEC deliberately is NOT. A spec may be a selector
-            # resolved on the machine, a device node, an OpenCV index, a video file or a URL, and
-            # re-validating it here would narrow what the client already accepts — which is how
-            # the /dev/videoN assumption got in. The client resolves it and refuses a spec
-            # matching zero devices or more than one, before torque.
+            # The NAME is checked here, not the SPEC: a spec may be a selector, a device node, an
+            # OpenCV index, a video file or a URL. The client resolves it and refuses one matching
+            # zero devices or several, before torque.
             seen=""
             for pair in $(echo "{{ cameras }}" | tr ';' ' '); do
               case "${pair}" in
@@ -469,16 +424,14 @@ workflow:
 {% endif %}
       inputs:
       - url: "{{ source_dataset_url }}"
-      # LAST, so {{input:0}} still means the dataset. OSMO propagates failure only along
-      # `inputs: - task:` edges, never along group order — without this edge preflight can
-      # fail while this stage runs to completion, which is what a review demonstrated.
+      # Keep check-config LAST in every input list, so {{input:0}} keeps meaning the dataset.
+      # It is an input rather than just an earlier group because failure propagates only along
+      # input edges.
       - task: check-config
       outputs:
-      # Keyed by dataset NAME, not run id, so conversion is a CACHE: it is expensive, its
-      # result is reusable, and a run-id-keyed prefix means re-converting every time and then
-      # hand-copying a workflow-stamped path into the next submission. Conversion must
-      # therefore be idempotent. Keyed by model too, because the two real stacks want mutually
-      # unreadable formats and a prefix named only by dataset would have one overwrite the other.
+      # Keyed by model and dataset NAME, not by run id, so the converted tree is a reusable
+      # cache. Re-running prepare over an existing prefix must therefore be safe, which is an
+      # obligation on the model's prepare.sh.
       - url: "{{ storage_url }}/dataset/{{ model }}/{{ dataset_name }}/"
       files:
       - localpath: models/{{ model }}/install.sh
@@ -510,8 +463,7 @@ workflow:
             || { echo "ERROR: {{input:0}} is empty — check source_dataset_url" >&2; exit 1; }
           bash /tmp/prepare.sh "{{input:0}}" "{{output}}"
 
-          # Model-independent, and deliberately AFTER the model's conversion: it checks the tree
-          # that will actually be trained on, not the one that arrived.
+          # Runs after the conversion, so it checks the tree that will be trained on.
           DS="{{output}}" \
           EXPECT_EPISODES="{{ expected_episodes }}" \
           EXPECT_STATE_DIM="{{ expected_state_dim }}" \
@@ -566,14 +518,9 @@ workflow:
             || { echo "ERROR: {{input:0}} is empty — check the dataset input" >&2; exit 1; }
           bash /tmp/train.sh "{{input:0}}" "{{output}}" {{ steps }} {{ batch_size }} {{ save_freq }} {{ seed }}
 
-          # A manifest per published artifact. OSMO's uploader logs per-file failures and then
-          # reports success anyway, and this task cannot check its own upload — the uploader runs
-          # after the container exits. So the manifest travels WITH the checkpoint and the scoring
-          # stage verifies its download against it. Without this a truncated 25 GB checkpoint is
-          # indistinguishable from a complete one until a policy predicts at the wrong scale.
-          #
-          # Exit status deferred until after publication: failing here would leave nothing to
-          # diagnose the failure from.
+          # A manifest of files and sizes travels inside each published artifact, so a later
+          # stage can tell a complete download from a truncated one. The exit status is held
+          # until after publishing, so a failure still leaves its artifacts behind.
           MANIFEST_RC=0
           python3 - {{output}} <<'PY' || MANIFEST_RC=$?
           import json, pathlib, sys
@@ -591,15 +538,11 @@ workflow:
                   found.append(dict(path=str(p.relative_to(root)), bytes=p.stat().st_size))
               return found
 
-          # A manifest per artifact rather than one for the whole tree, because a run can publish
-          # a final export and several checkpoints and each is downloaded independently.
-          # DELIBERATELY NOT "is this checkpoint usable". An earlier version asserted a file
-          # from one model's checkpoint layout here — experiment_cfg/dataset_statistics.json —
-          # which is model-specific logic in a model-independent task, and it failed every
-          # LeRobot-native model. The manifest's job is WHAT WAS PUBLISHED AND HOW BIG, which is
-          # the only question the pipeline can answer about any model's artifact. Whether a
-          # checkpoint is loadable is the model's question, and each model's score.sh and serve.sh
-          # already refuse an incomplete one by name before loading it.
+          # One manifest per artifact: a run can publish a final export and several checkpoints,
+          # and each is downloaded on its own.
+          # Records what was published and how big. Whether a checkpoint is loadable is the
+          # model's question: each model's score.sh and serve.sh refuse an incomplete one by name
+          # before loading it.
           for root, skip in [(out, checkpoints)] + [(c, []) for c in checkpoints]:
               name = str(root.relative_to(out)) if root != out else "(final export)"
               found = files_under(root, skip)
@@ -628,7 +571,7 @@ workflow:
           chmod -R a+rX {{output}}
           echo "published $(find {{output}} -type f | wc -l) files"
 
-          # Now fail, if the manifest found an artifact without its normalisation statistics.
+          # Fail only if nothing was published at all.
           if [ "${MANIFEST_RC}" -ne 0 ]; then
             echo "ERROR: published checkpoint is incomplete; see above" >&2
             exit "${MANIFEST_RC}"
@@ -690,8 +633,8 @@ workflow:
           chmod -R a+rX {{output}}
           cat {{output}}/metrics.json
           # A gate has to exit non-zero, or the stage after it runs anyway. `complete` says the
-          # requested sample was actually scored — the one check that is about the measurement
-          # rather than the policy, and the only one stable enough to gate on. See CONTRACT.md.
+          # requested sample was actually scored. The error figures are reported, never gated;
+          # see README.md.
           python3 - {{output}}/metrics.json <<'PY'
           import json, sys
           m = json.load(open(sys.argv[1]))
@@ -748,10 +691,9 @@ workflow:
         path: /tmp/common.py
       - localpath: models/{{ model }}/serve_lib.py
         path: /tmp/serve_lib.py
-      # The transport, injected into BOTH ends of this group because it IS one thing with two
-      # ends: a server and client disagreeing about the wire is the failure contract B exists to
-      # prevent, and two slots would invite exactly that drift. May be empty — a model whose
-      # transport is an installable package provides it in client_transport.sh instead.
+      # The transport, injected into both ends of this group so the server and client cannot
+      # disagree about the wire. May be empty: a model whose transport is an installable package
+      # provides it from client_transport.sh instead.
       - localpath: models/{{ model }}/transport.py
         path: /tmp/transport.py
       command: [bash, -c]
@@ -765,8 +707,7 @@ workflow:
           # was not trained on.
           # ';' between cameras, ',' between the NAMES on the way out — the server's flag takes a
           # comma-separated list. Getting this separator wrong extracts one name from the whole
-          # string and the server then refuses the rig, which is the check working rather than a
-          # false alarm.
+          # string, and the server then refuses the rig.
           CAMERA_NAMES="$(echo "{{ cameras }}" | tr ';' '\n' | cut -d= -f1 | paste -sd, -)"
           echo "camera names for the server: ${CAMERA_NAMES}"
           bash /tmp/serve.sh "{{input:0}}" "{{input:1}}" {{ policy_port }} "${CAMERA_NAMES}"
@@ -776,19 +717,17 @@ workflow:
       image: "{{ client_image }}"
       resource: robot
       # Character devices fail to open without it, while looking present and correctly owned.
-      # It also hands the container the host's whole /dev, which is what lets a camera selector
-      # resolve at run time — so NO camera volumeMounts are declared, and none would help: a
-      # selector is resolved on the node while volumeMounts is fixed at submit.
+      # It also gives the container the host's whole /dev, which is what lets a camera selector
+      # resolve on the node. No camera volumeMounts are declared; a selector is not known at
+      # submit time, so none would help.
       privileged: true
       volumeMounts:
         - "{{ robot_port }}"
       outputs:
       - url: "{{ storage_url }}/hil/{{ model }}/{{workflow_id}}/"
       files:
-      # The robot client is SHARED and model-independent — it speaks a socket and drives an arm.
-      # It is NOT selected by the model variable, and there is exactly one copy in the repo,
-      # because everything below its ArmDriver is hardware safety earned on this arm and a
-      # drifting second copy fails by leaving the arm energised.
+      # The robot client is shared and model-independent, and is not selected by the model
+      # variable. There is exactly one copy of it in the repo.
       - localpath: ../so101-vla/files/eval_so101_bounded.py
         path: /tmp/eval_so101_bounded.py
       # The transport IS the model's choice, so it comes from the model directory.
@@ -806,16 +745,14 @@ workflow:
         - |
           set -euo pipefail
 
-          # CPU wheels deliberately. lerobot imports torch transitively (motors_bus ->
-          # lerobot.utils -> device_utils) so it cannot be skipped, and the CUDA build is ~2.5 GB
-          # of no use on a machine with no GPU — which matters when the download crosses a lab's
-          # own internet link.
+          # CPU wheels: lerobot imports torch transitively so it cannot be skipped, and the CUDA
+          # build is ~2.5 GB of no use on a machine with no GPU.
           pip install --quiet --root-user-action=ignore \
             --index-url https://download.pytorch.org/whl/cpu \
             "torch=={{ torch_version }}" "torchvision=={{ torchvision_version }}"
 
-          # Tarball because this image has no git. One resolve, not several: installed separately,
-          # transformers and lerobot silently downgrade each other's huggingface-hub.
+          # A tarball, because this image has no git. One resolve rather than several: installed
+          # separately, these packages downgrade each other's huggingface-hub.
           pip install --quiet --root-user-action=ignore \
             "lerobot[feetech] @ https://github.com/huggingface/lerobot/archive/{{ lerobot_commit }}.tar.gz" \
             "pyzmq=={{ pyzmq_version }}" \
@@ -828,10 +765,9 @@ workflow:
           export PYTHONPATH="/tmp${PYTHONPATH:+:${PYTHONPATH}}"
           source /tmp/client_transport.sh
 
-          # Conditional flags go into arrays rather than into the command's own backslash
-          # continuation: a conditional block that renders to nothing still leaves a blank line,
-          # and a blank line after a trailing backslash ends the command early and silently
-          # drops every argument after it.
+          # Conditional flags go into arrays, never into the command's own backslash
+          # continuation: a block rendering to nothing leaves a blank line, which would end the
+          # command early and drop every argument after it.
           EXTRA=()
 {% if calibration_localpath %}
           EXTRA+=(--calibration-dir /tmp/calibration)
@@ -839,10 +775,7 @@ workflow:
 {% if home_pose %}
           EXTRA+=(--home-pose "{{ home_pose }}" --home-ramp-s {{ home_ramp_s }})
 {% endif %}
-          # --no-motion is a store_true flag, so it is present or absent rather than given a
-          # value. allow_motion reads the way it behaves: the arm moves only if you pass true.
-          # The previous spelling was a double negative, which is how a run believed to be
-          # powered once moved nothing.
+          # --no-motion is a store_true flag: present or absent, never given a value.
 {% if allow_motion | string | lower != 'true' %}
           EXTRA+=(--no-motion)
 {% endif %}
@@ -891,22 +824,16 @@ workflow:
             --lang-instruction "{{ lang_instruction }}" \
             --output-dir {{output}} 2>&1 | tee {{output}}/hil_eval.log
 
-          # LINEAGE. Given a HIL result months later, what produced it? The client cannot answer
-          # that: it sees numbered mount points, not URLs, and it does not know which model
-          # directory was selected. So the pipeline writes what only it knows, beside the client's
-          # own results.json, which already records which physical device each camera name
-          # resolved to and whether torque was ever enabled.
-          #
-          # Written AFTER the client so a run that aborted still gets one — the question "what
-          # drove the arm" matters most about the runs that went wrong.
+          # lineage.json records what produced this result: the source URLs, the model, and the
+          # stages that ran. It sits beside the client's results.json, which records what the
+          # client resolved. Written after the client, so an aborted run still gets one.
           python3 - {{output}}/lineage.json <<'PY'
           import json, pathlib, sys
           out = pathlib.Path(sys.argv[1])
           record = {
               "workflow_id": "{{workflow_id}}",
               "model": "{{ model }}",
-              # A chained checkpoint has no URL at all: its input is <workflow-id>/<task-name>/.
-              # That is better provenance than a URL, so it is recorded as such rather than blank.
+              # A chained checkpoint has no URL; its input is <workflow-id>/<task-name>/.
 {% if run_train | string | lower == 'true' %}
               "checkpoint_source": {"kind": "task", "task": "train-model", "workflow_id": "{{workflow_id}}"},
 {% else %}
@@ -920,10 +847,8 @@ workflow:
               "cameras_requested": "{{ cameras }}",
               "robot_port": "{{ robot_port }}",
               "robot_id": "{{ robot_id }}",
-              # Normalised to a real JSON boolean. A YAML `false` renders Python-cased as "False"
-              # while a --set false renders "true"/"false", so the raw value would be a STRING
-              # whose case depends on how it was passed — and "False" is truthy, so a reader
-              # checking `if record["allow_motion"]` on a rehearsal would conclude the arm moved.
+              # A real JSON boolean. The raw value's case depends on how it was passed, and the
+              # Python-cased spelling is a truthy string.
               "allow_motion": "{{ allow_motion }}".strip().lower() == "true",
               "lang_instruction": "{{ lang_instruction }}",
               "action_horizon": {{ action_horizon }},
@@ -937,8 +862,7 @@ workflow:
                       ("eval", "{{ run_eval }}"), ("hil", "{{ run_hil }}"),
                   )
               },
-              # What the client resolved, lifted out of its own output so one file answers the
-              # whole question rather than two that have to be correlated by hand.
+              # Lifted from the client's own output so one file answers the whole question.
               "resolved": {},
           }
           results = out.parent / "results.json"
