@@ -46,11 +46,21 @@ default-values:
   # --- which model -----------------------------------------------------------
   # Selects models/<model>/. Never appears in a conditional.
   model: gr00t-n17
-  # The image the model's scripts expect. A model needing a different base sets it — ideally
-  # from models/<name>/model.vars, so adding a model still touches no existing file.
-  runtime_image: public.ecr.aws/docker/library/python:3.12-slim
-  # Credentials the model's scripts need. Empty means none. A gated model sets this, which is
-  # what keeps "adding a model edits nothing" true for the models we actually have.
+  # The container image the model's scripts need. REQUIRED, and it has no usable default: no one
+  # image suits every model, so the value below is deliberately not a valid image reference and a
+  # submission that never supplied one is rejected up front, rather than failing minutes later
+  # inside a container that could not have worked.
+  #
+  # Set it in models/<name>/model.vars, which `./submit.sh --model <name>` loads:
+  #
+  #   runtime_image="nvcr.io/nvidia/pytorch:25.04-py3"
+  runtime_image: <set-runtime_image-in-the-models-model.vars>
+
+  # An OSMO credential name, exposed to the model's scripts as HF_TOKEN. The default below works:
+  # empty means no credential, which is right for a model whose weights and tokenizer are public.
+  # Override it in models/<name>/model.vars only for a model that pulls from a gated repository:
+  #
+  #   hf_token_credential="huggingface_token"
   hf_token_credential: ""
 
   # --- data in, artefacts out ------------------------------------------------

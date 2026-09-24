@@ -195,10 +195,24 @@ Everything else is reported. Two reasons, both learned by measuring:
 
 ## `model.vars` — optional
 
-A file of `k=v` lines carrying values that belong to the model rather than the run: `runtime_image`,
-`hf_token_credential`, and anything else the model needs the *spec* to know. Expanded into `--set` by
-the user. This is what keeps "adding a model edits nothing" true for a model that needs a gated
-repository or a different base image.
+Shell assignments carrying values that belong to the model rather than to a run, which the *spec*
+nonetheless has to know:
+
+```sh
+runtime_image="nvcr.io/nvidia/pytorch:25.04-py3"
+hf_token_credential="huggingface_token"
+```
+
+**`runtime_image` is the only required one.** The pipeline's default is an unparseable placeholder,
+because no image is right for every model and a default that submits and then fails inside the
+container is worse than one rejected up front.
+
+`hf_token_credential` names an OSMO credential exposed to the model's scripts as `HF_TOKEN`, and the
+pipeline's empty default already works — a model overrides it only to pull from a gated repository. So
+a model needing nothing else can be a one-line file.
+
+`./submit.sh --model <name>` loads this file. Assembling `--set` by hand means passing these yourself,
+and omitting `runtime_image` is only caught at submit, not at `--dry-run`.
 
 ## The robot interface is elsewhere
 

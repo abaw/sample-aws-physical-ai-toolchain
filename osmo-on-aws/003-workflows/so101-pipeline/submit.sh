@@ -128,6 +128,30 @@ if [ "${#UNKNOWN[@]}" -gt 0 ]; then
   exit 2
 fi
 
+# runtime_image belongs to the model and the spec's default is deliberately unparseable, so a
+# submission without it is rejected -- but only at submit, not at --dry-run, and the message names
+# the value rather than where it comes from. Caught here instead, where the fix can be named.
+if [ -z "${VALUES[runtime_image]+set}" ]; then
+  die "runtime_image is not set. It belongs to the model: pass --model <name> to load its model.vars, or set runtime_image=<image> explicitly."
+fi
+
+# A placeholder passed explicitly is rejected the same way, for the same reason.
+for key in "${ORDER[@]}"; do
+  # Two placeholder spellings: REPLACE-WITH- for values a user fills in, and <angle-brackets> for
+  # ones that come from a model's own variables file.
+  case "${VALUES[$key]}" in
+    *REPLACE-WITH-*|*"<"*">"*)
+      echo "ERROR: ${key} is still a placeholder: '${VALUES[$key]}'" >&2
+      case "${key}" in
+        runtime_image|hf_token_credential)
+          echo "       It belongs to the model. Pass --model <name> to load models/<name>/model.vars." >&2 ;;
+        *)
+          echo "       Pass it as ${key}=<value>." >&2 ;;
+      esac
+      exit 2 ;;
+  esac
+done
+
 # Numeric values keep --set so the spec's arithmetic still works; everything else is forced to a
 # string so a leading number cannot swallow the rest of the value.
 SET_ARGS=()

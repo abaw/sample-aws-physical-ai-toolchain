@@ -55,7 +55,7 @@ train_lib.py         train              may be empty
 score_lib.py         eval               may be empty
 serve_lib.py         hil                may be empty
 transport.py         both hil tasks     may be empty
-model.vars           runtime image, credentials — anything the SPEC must know
+model.vars           runtime image (required), credentials — what the SPEC must know
 ```
 
 **Why the slots are mandatory rather than optional.** A missing `localpath` fails at `validate`, naming the
