@@ -15,11 +15,11 @@ DS="${2:?score.sh needs a dataset root}"
 OUT="${3:?score.sh needs an output directory}"
 TRAJ_IDS="${4:?score.sh needs trajectory ids}"
 HORIZON="${5:?score.sh needs an execution horizon}"
-MAX_STEPS="${6:?score.sh needs a step cap}"
+FRAMES="${6:?score.sh needs a per-trajectory frame cap}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 CKPT="$(smolvla_resolve_checkpoint "${CKPT_IN}")"
-echo "[smolvla] score: ${CKPT} trajs='${TRAJ_IDS}' horizon=${HORIZON} max_steps=${MAX_STEPS}"
+echo "[smolvla] score: ${CKPT} trajs='${TRAJ_IDS}' horizon=${HORIZON} frames_per_trajectory=${FRAMES}"
 mkdir -p "${OUT}"
 
 set +e
@@ -29,7 +29,7 @@ python -u "${HERE}/score_lib.py" \
   --repo-id "${REPO_ID:-local/so101-smolvla}" \
   --traj-ids "${TRAJ_IDS}" \
   --execution-horizon "${HORIZON}" \
-  --max-steps "${MAX_STEPS}" \
+  --frames-per-trajectory "${FRAMES}" \
   --warn-reversals "${WARN_REVERSALS:-0.25}" \
   --output-dir "${OUT}" \
   2>&1 | tee "${OUT}/openloop_eval.log"

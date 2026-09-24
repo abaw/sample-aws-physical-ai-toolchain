@@ -56,12 +56,14 @@ default-values:
   #   runtime_image="nvcr.io/nvidia/pytorch:25.04-py3"
   runtime_image: <set-runtime_image-in-the-models-model.vars>
 
-  # An OSMO credential name, exposed to the model's scripts as HF_TOKEN. The default below works:
-  # empty means no credential, which is right for a model whose weights and tokenizer are public.
-  # Override it in models/<name>/model.vars only for a model that pulls from a gated repository:
+  # The OSMO credential holding a Hugging Face token, exposed to every stage as HF_TOKEN. A
+  # property of your DEPLOYMENT, not of any model — create it once (see README.md) and leave this
+  # alone. Supplied for every model, including ones whose weights are public, because a token
+  # raises Hub rate limits and download throughput.
   #
-  #   hf_token_credential="huggingface_token"
-  hf_token_credential: ""
+  # Empty it only if your deployment has no such credential; a model needing a gated repository
+  # will then fail at load time with HTTP 403.
+  hf_token_credential: huggingface_token
 
   # --- data in, artefacts out ------------------------------------------------
   storage_url: s3://REPLACE-WITH-YOUR-DATASETS-BUCKET/model-agnostic
@@ -85,11 +87,16 @@ default-values:
   batch_size: 4
   save_freq: 5000
   seed: 1000
-  # Use several trajectories; one is not evidence of convergence. Space-separated episode
-  # indices, ideally ones the fine-tune did not train on.
+  # --- eval: what to replay --------------------------------------------------
+  # Space-separated episode indices, ideally ones the fine-tune did not train on. Use several: one
+  # is not evidence of convergence.
   traj_ids: "3 7 11"
+  # Actions consumed from each predicted chunk before re-planning. Score at the value the robot
+  # will use, or this measures a trajectory nobody executes.
   execution_horizon: 16
-  max_steps: 400
+  # Frames of each trajectory to replay, capped by the episode's own length. NOT a bound on
+  # `steps` above, which counts training steps; this one is per trajectory, at eval time.
+  frames_per_trajectory: 400
 
   # --- the robot half --------------------------------------------------------
   # NAME=SPEC per camera, ';'-separated. NAME must be the dataset's own image-feature suffix —
@@ -281,7 +288,7 @@ workflow:
           echo "  seed             {{ seed }}"
           echo "  traj_ids         {{ traj_ids }}"
           echo "  execution_horiz  {{ execution_horizon }}"
-          echo "  max_steps        {{ max_steps }}"
+          echo "  frames_per_traj  {{ frames_per_trajectory }}"
           echo "  run_prepare      {{ run_prepare | string | lower }}"
           echo "  run_train        {{ run_train | string | lower }}"
           echo "  run_eval         {{ run_eval | string | lower }}"
@@ -639,7 +646,7 @@ workflow:
           set -euo pipefail
           source /tmp/install.sh eval
           mkdir -p {{output}}
-          bash /tmp/score.sh "{{input:0}}" "{{input:1}}" "{{output}}" "{{ traj_ids }}" {{ execution_horizon }} {{ max_steps }}
+          bash /tmp/score.sh "{{input:0}}" "{{input:1}}" "{{output}}" "{{ traj_ids }}" {{ execution_horizon }} {{ frames_per_trajectory }}
           chmod -R a+rX {{output}}
           cat {{output}}/metrics.json
           # A gate has to exit non-zero, or the stage after it runs anyway. `complete` says the

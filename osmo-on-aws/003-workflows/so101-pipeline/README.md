@@ -20,6 +20,27 @@ passes through. The `examples/*.vars` files are plain shell assignments — `tra
 format needs no explaining and quoting is explicit. Everything the helper does can be done by hand;
 `examples/README.md` says what goes wrong when it is.
 
+## Before the first run
+
+**A Hugging Face token, as an OSMO credential:**
+
+```bash
+osmo credential set huggingface_token --type GENERIC --payload-file token=<file-holding-the-token>
+```
+
+Every stage that loads a model gets it as `HF_TOKEN`. It is supplied for every model, including ones
+whose weights are public, because a token raises Hub rate limits and download throughput — and some
+models pull a backbone or tokenizer from a **gated** repository, where an anonymous run fails at load
+time with HTTP 403. For those the account behind the token must also have accepted that repository's
+terms; a token with the right scope still gets 403 until someone clicks through.
+
+The credential's name is a property of your deployment, not of any model. If yours is called something
+else, set `hf_token_credential=<name>`; if you have none, set it empty and expect gated models to fail.
+
+**An S3 bucket** the workflow role can read and write, and **a dataset** in LeRobot format.
+
+**A pool with a GPU platform**, plus a robot platform if you intend to run the hil stage.
+
 | Stage | Needs a GPU | Needs the robot | Publishes |
 |---|:---:|:---:|---|
 | preflight | no | no | nothing — it echoes the resolved configuration and fails early |
@@ -55,7 +76,7 @@ train_lib.py         train              may be empty
 score_lib.py         eval               may be empty
 serve_lib.py         hil                may be empty
 transport.py         both hil tasks     may be empty
-model.vars           runtime image (required), credentials — what the SPEC must know
+model.vars           runtime image — what the SPEC must know, not what scripts decide
 ```
 
 **Why the slots are mandatory rather than optional.** A missing `localpath` fails at `validate`, naming the

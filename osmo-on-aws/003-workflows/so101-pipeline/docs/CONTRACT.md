@@ -55,7 +55,7 @@ and the pipeline needs no conditional to know which models have which.
 install.sh           SOURCED by every stage. $1 stage (prepare|train|eval|serve)
 prepare.sh           $1 dataset-in   $2 dir-out
 train.sh             $1 dataset  $2 dir-out  $3 steps  $4 batch  $5 save-freq  $6 seed
-score.sh             $1 ckpt  $2 dataset  $3 dir-out  $4 traj-ids  $5 horizon  $6 steps
+score.sh             $1 ckpt  $2 dataset  $3 dir-out  $4 traj-ids  $5 horizon  $6 frames
 serve.sh             $1 ckpt  $2 dataset  $3 port  $4 camera-names
 client_transport.sh  SOURCED by the robot task; exports TRANSPORT_MODULE
 common.py            injected into every stage        may be empty
@@ -195,24 +195,23 @@ Everything else is reported. Two reasons, both learned by measuring:
 
 ## `model.vars` — optional
 
-Shell assignments carrying values that belong to the model rather than to a run, which the *spec*
-nonetheless has to know:
+Shell assignments carrying what the model needs the *spec* to know, as distinct from what its own
+scripts decide. In practice that is one value:
 
 ```sh
 runtime_image="nvcr.io/nvidia/pytorch:25.04-py3"
-hf_token_credential="huggingface_token"
 ```
 
-**`runtime_image` is the only required one.** The pipeline's default is an unparseable placeholder,
-because no image is right for every model and a default that submits and then fails inside the
-container is worse than one rejected up front.
+**Required**, because no one image suits every model. The pipeline's default is an unparseable
+placeholder, so a submission that never supplied one is rejected before a node is consumed rather
+than failing inside a container that could not have worked.
 
-`hf_token_credential` names an OSMO credential exposed to the model's scripts as `HF_TOKEN`, and the
-pipeline's empty default already works — a model overrides it only to pull from a gated repository. So
-a model needing nothing else can be a one-line file.
+Anything the model can decide *inside* its own scripts — learning rate, dtype, embodiment tag, GPU
+count, denoising steps — does not belong here. A value belongs here only when the spec itself
+consumes it, which is why the list is short: a task's `image:` is evaluated before any script runs.
 
-`./submit.sh --model <name>` loads this file. Assembling `--set` by hand means passing these yourself,
-and omitting `runtime_image` is only caught at submit, not at `--dry-run`.
+`./submit.sh --model <name>` loads this file. Assembling `--set` by hand means passing these
+yourself, and omitting `runtime_image` is only caught at submit, not at `--dry-run`.
 
 ## The robot interface is elsewhere
 

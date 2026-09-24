@@ -50,7 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Actions consumed per chunk before re-planning. Scoring must use the same "
         "value the robot will, or it measures a trajectory nobody executes.",
     )
-    p.add_argument("--max-steps", type=int, default=400)
+    p.add_argument(
+        "--frames-per-trajectory",
+        type=int,
+        default=400,
+        help="Frames of each trajectory to replay, capped by the episode length.",
+    )
     p.add_argument("--warn-reversals", type=float, default=0.25)
     p.add_argument("--output-dir", required=True)
     return p
@@ -108,7 +113,7 @@ def main() -> int:  # noqa: PLR0915 - a linear scoring pass, ordered by trajecto
 
         start = dataset.meta.episodes["dataset_from_index"][traj_id]
         end = dataset.meta.episodes["dataset_to_index"][traj_id]
-        length = min(end - start, args.max_steps)
+        length = min(end - start, args.frames_per_trajectory)
 
         predicted, truth = [], []
         policy.reset()

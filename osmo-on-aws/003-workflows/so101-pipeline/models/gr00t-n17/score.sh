@@ -14,11 +14,11 @@ DS="${2:?score.sh needs a dataset root}"
 OUT="${3:?score.sh needs an output directory}"
 TRAJ_IDS="${4:?score.sh needs trajectory ids}"
 HORIZON="${5:?score.sh needs an execution horizon}"
-MAX_STEPS="${6:?score.sh needs a step cap}"
+FRAMES="${6:?score.sh needs a per-trajectory frame cap}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CKPT="$(gr00t_resolve_checkpoint "${CKPT_IN}")"
 
-echo "[gr00t-n17] score: trajs='${TRAJ_IDS}' horizon=${HORIZON} max_steps=${MAX_STEPS}"
+echo "[gr00t-n17] score: trajs='${TRAJ_IDS}' horizon=${HORIZON} frames_per_trajectory=${FRAMES}"
 mkdir -p "${OUT}/plots"
 
 # Upstream's evaluator writes its per-trajectory plots to a fixed path of its own rather than
@@ -42,7 +42,7 @@ python gr00t/eval/open_loop_eval.py \
   --traj-ids ${TRAJ_IDS} \
   --execution-horizon "${HORIZON}" \
   --denoising-steps "${DENOISING_STEPS:-4}" \
-  --steps "${MAX_STEPS}" 2>&1 | tee "${OUT}/openloop_eval.log"
+  --steps "${FRAMES}" 2>&1 | tee "${OUT}/openloop_eval.log"
 
 # Smoothness, which the error metrics above cannot see: a zero-mean oscillation on a broadly
 # correct trajectory scores well on MSE and MAE, and on a real arm it is what overheats a joint.
