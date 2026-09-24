@@ -467,7 +467,7 @@ workflow:
         path: /tmp/prepare_lib.py
       # Model-INDEPENDENT validation: episode count and state dimensionality against what the
       # submitter asserted. Runs on the prepared tree, so it checks what will be trained on.
-      - localpath: ../so101-vla/files/validate_common.py
+      - localpath: shared/validate_common.py
         path: /tmp/validate_common.py
       command: [bash, -c]
       args:
@@ -638,7 +638,7 @@ workflow:
         path: /tmp/score_lib.py
       # Shared trajectory statistics, so a figure two models report under one name is one
       # implementation. Lands beside score_lib.py, which imports it.
-      - localpath: ../so101-vla/files/trajectory_metrics.py
+      - localpath: shared/trajectory_metrics.py
         path: /tmp/trajectory_metrics.py
       command: [bash, -c]
       args:
@@ -745,7 +745,7 @@ workflow:
       files:
       # The robot client is shared and model-independent, and is not selected by the model
       # variable. There is exactly one copy of it in the repo.
-      - localpath: ../so101-vla/files/eval_so101_bounded.py
+      - localpath: robot/eval_so101_bounded.py
         path: /tmp/eval_so101_bounded.py
       # The transport IS the model's choice, so it comes from the model directory.
       - localpath: models/{{ model }}/client_transport.sh

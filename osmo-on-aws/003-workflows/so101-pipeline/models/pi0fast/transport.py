@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ZMQ REQ/REP transport shared by the pi0-FAST policy server and the robot client.
 
-The robot client is `so101-vla/files/eval_so101_bounded.py`, reused unchanged: every line of
+The robot client is `../../robot/eval_so101_bounded.py`, reused unchanged: every line of
 its hardware safety — envelope clamping, per-step delta limits, temperature confirmation, the
 release path, torque read-back — was earned on this arm and must not exist in two copies that
 can drift apart. It takes `--transport-module`, and this is what that points at.
