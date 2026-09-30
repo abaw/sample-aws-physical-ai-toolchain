@@ -121,6 +121,11 @@ Rehearse in this order:
 `cameras` takes `NAME=SPEC` entries separated by `;`. `NAME` must be the dataset's image-feature suffix,
 because that is what the policy server matches on — never position.
 
+The split matters if you swap the environment: the **name** is the client's business, because it goes on
+the wire, while the **spec** is interpreted by whatever environment is driving. The selector forms below
+are the physical arm's vocabulary; a simulator would define its own, and would report what it resolved
+through the same `camera_sources()` that puts the table into `results.json`.
+
 | SPEC | Resolves to |
 |---|---|
 | `sysfs:*/3-5.1/*` | the capture device whose sysfs path matches — stable per physical port |
@@ -152,6 +157,34 @@ Joint margins, per-step caps, deadbands, temperature limits, cooldown and releas
 variables even though the client defaults every one. They are properties of the *robot*, not of a run and
 not of a model — no model chooses any of them — and the point of an e-stop-adjacent limit is that it stays
 reachable.
+
+### What the client drives: real arm or simulator
+
+Three files go into the robot task. `eval_so101_bounded.py` is the client, `environment.py` is the
+interface it drives through, and `so101_environment.py` is the implementation for a physical arm. To run
+against a simulator, ship a different implementation of the interface in place of the third; the client,
+the spec, the transport and the policy server are untouched.
+
+Everything device-specific is behind the interface, including the parts that are not obviously about
+motion: the serial port, the calibration file, and turning a camera spec into a capture device. The
+client names exactly one implementation, on one line, and touches no `/dev` entry and no LeRobot object
+itself.
+
+The interface is the *robot's* contract, like the policy interface, and `environment.py` is its
+specification. Two rules in it decide whether a substitute is safe:
+
+- **Every member is callable at any time between `connect` and `disconnect`, in any order.** An
+  implementation may not need one member to have run before another works. `connect` therefore has to
+  establish everything the rest needs — which for the real arm means registering a unit mapping and
+  opening the cameras.
+- **A query with no answer returns `None`, and `None` never means an empty reading.** `temperatures()`
+  returning `None` says "this environment has no notion of heat"; returning `{}` says "I should have been
+  able to read it and could not", which the client treats as *still hot*. Same for `torque_state()`: `None`
+  is nothing to release, `{}` is an unverified release and reported as a failure to release. Answering
+  `{}` where `None` is meant makes a simulator indistinguishable from a servo bus that has gone quiet.
+
+`is_physical()` is recorded in `results.json` and nothing branches on it. It says what produced a result,
+not what the client may ask for.
 
 ## Reading a result
 

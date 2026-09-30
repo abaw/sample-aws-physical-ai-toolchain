@@ -27,29 +27,34 @@ Three sources, deliberately kept separate:
 * **Everything that keeps the arm safe** is this file's own, and every item of it was
   earned by something that happened on this hardware. See ``ArmDriver``.
 
-Units. The arm is driven through LeRobot's ``SO101Follower``, never through raw servo
-ticks, because the policy speaks LeRobot's *calibrated* joint space: five arm joints in
-degrees about the midpoint of each joint's calibrated range, and the gripper 0-100 over
-its own. Reimplementing that mapping is the one bug in this file that would be both
-silent and destructive, so it is not reimplemented — it is restated once, in
-``_normalized_from_tick``, purely so it can be checked against LeRobot's own answer on
-the live arm before any torque is enabled.
+Units. This file has no notion of servo ticks. The environment reports its joint limits in the
+same space the policy emits actions in, and does whatever conversion that needs internally — so
+the clamp and the action it bounds are in one space by construction, rather than by a conversion
+restated here and checked against the device.
 """
+
+# Required, not cosmetic: `Environment` below is imported only for type checkers, so without
+# postponed evaluation the annotations referencing it raise NameError at import.
+from __future__ import annotations
 
 import argparse
 import dataclasses
-import fnmatch
 import json
-import os
 import pathlib
 import signal
 import statistics
 import sys
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import numpy as np
 import zmq
+
+if TYPE_CHECKING:
+    # Names the object `ArmDriver` drives. Guarded because `environment.py` is injected beside this
+    # file rather than installed; the implementation chosen for the run is imported inside main().
+    from environment import Environment
 
 # Joint order is load-bearing: it is the order the dataset was recorded in, the order
 # the checkpoint's action head emits, and the order the servos are addressed in.
@@ -57,10 +62,6 @@ JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_ro
 ARM_JOINTS = JOINTS[:5]
 GRIPPER = "gripper"
 STATE_KEYS = [f"{j}.pos" for j in JOINTS]
-
-# STS3215 has 4096 positions, so the largest index is 4095. LeRobot normalizes against
-# resolution - 1, which is the whole reason this constant is not 4096.
-RESOLUTION_MINUS_1 = 4095
 
 LANGUAGE_KEY = "annotation.human.task_description"
 
@@ -103,100 +104,11 @@ _stop = threading.Event()
 # ---------------------------------------------------------------------------
 # Cameras
 #
-# A camera is named by the dataset's image-feature suffix, and pointed at by a spec that is
-# either resolved against sysfs or handed to OpenCV untouched.
-#
-# /dev/videoN is assigned in enumeration order, so a replug or a reboot renumbers it: a spec
-# naming one directly is a value that goes stale without saying so, and the arm then faithfully
-# drives on the wrong camera's frames. The selector forms name something durable instead. sysfs
-# is host-wide and mounted into every container by the runtime, so resolving needs no
-# volumeMount and no privileged.
-
-V4L2_SYSFS = pathlib.Path("/sys/class/video4linux")
-
-
-def _v4l2_nodes() -> list[dict]:
-    """Every v4l2 node the kernel knows about, whatever bus it sits on.
-
-    A node is identified by its **major:minor**, not by its name: the number in ``videoN``
-    is the thing being distrusted, so matching the container's ``/dev`` entry by name would
-    reintroduce the assumption the selector exists to remove.
-    """
-    nodes = []
-    for entry in sorted(V4L2_SYSFS.glob("video*")):
-        try:
-            major, minor = (int(x) for x in (entry / "dev").read_text().strip().split(":"))
-            nodes.append(
-                {
-                    "sysfs": str(entry.resolve()),
-                    "name": (entry / "name").read_text().strip(),
-                    "index": int((entry / "index").read_text().strip()),
-                    "rdev": os.makedev(major, minor),
-                }
-            )
-        except (OSError, ValueError):
-            # A node that disappeared mid-scan, or one whose attributes a driver does not
-            # publish. Skipping is right: it cannot be selected either way.
-            continue
-    return nodes
-
-
-def _device_for_rdev(rdev: int) -> pathlib.Path | None:
-    """The ``/dev`` entry with this major:minor, or None if it was not granted to us."""
-    for candidate in sorted(pathlib.Path("/dev").glob("video*")):
-        try:
-            if os.stat(candidate).st_rdev == rdev:
-                return candidate
-        except OSError:
-            continue
-    return None
-
-
-def _resolve_camera_spec(spec: str) -> tuple[object, str]:
-    """One ``--camera`` spec into something ``cv2.VideoCapture`` accepts.
-
-    Returns ``(index_or_path, account)``, where the account is printed so a run's log
-    records which physical device it actually opened rather than which one it was asked for.
-    """
-    for prefix, field in (("sysfs:", "sysfs"), ("name:", "name")):
-        if not spec.startswith(prefix):
-            continue
-        pattern = spec[len(prefix) :]
-        if not pattern:
-            raise Abort(f"camera spec {spec!r} has an empty pattern")
-
-        # index 0 is the capture node on a UVC camera and the others carry metadata, so this
-        # filter is what stops a two-node camera matching itself twice. It is a convenience,
-        # not a guarantee: a wrong pick would fail in cv2 at connect() anyway.
-        capture = [n for n in _v4l2_nodes() if n["index"] == 0]
-        matches = [n for n in capture if fnmatch.fnmatch(n[field], pattern)]
-        if not matches:
-            seen = ", ".join(repr(n[field]) for n in capture) or "none"
-            raise Abort(f"camera spec {spec!r} matched no capture device. Present: {seen}")
-        if len(matches) > 1:
-            raise Abort(
-                f"camera spec {spec!r} is ambiguous, matching "
-                + ", ".join(m["sysfs"] for m in matches)
-                + " — refusing to guess which one the dataset means"
-            )
-
-        node = matches[0]
-        device = _device_for_rdev(node["rdev"])
-        if device is None:
-            raise Abort(
-                f"camera spec {spec!r} resolved to {node['sysfs']}, but no /dev entry with "
-                f"that major:minor is visible here"
-            )
-        return device, f"{spec} -> {device} ({node['name']}, {node['sysfs']})"
-
-    # Not a selector, so it is OpenCV's own vocabulary: an index, a device node, a video
-    # file, or a URL. Deliberately not re-validated — cv2.VideoCapture accepts more forms
-    # than a check here would, and narrowing it is how the /dev/video2 assumption got in.
-    if spec.isdigit():
-        return int(spec), f"{spec} -> OpenCV index {spec} (verbatim)"
-    if spec.startswith("/") or pathlib.Path(spec).exists():
-        return pathlib.Path(spec), f"{spec} -> {spec} (verbatim, not resolved)"
-    return spec, f"{spec} -> {spec} (verbatim, handed to OpenCV as-is)"
+# Only the NAME is this file's business. A name is the dataset's image-feature suffix and
+# goes on the wire to the policy server, which matches on it. What sits behind the name is
+# the environment's business: resolving a spec to a device is Linux-specific and lives in
+# the implementation, which reports what it selected through `camera_sources()`.
+# ---------------------------------------------------------------------------
 
 
 def _parse_cameras(values: list[str]) -> dict[str, str]:
@@ -272,48 +184,40 @@ class RateLimiter:
 # ---------------------------------------------------------------------------
 
 
-def _normalized_from_tick(calibration, joint: str, tick: float) -> float:
-    """LeRobot's own normalization, restated so a drift between us can be detected.
-
-    Not used to drive the arm — ``SO101Follower`` does that. Used only to turn the
-    calibration's raw ``range_min``/``range_max`` into the units a policy action arrives
-    in, so the safety envelope can be expressed in the same space as the actions it
-    bounds. ``ArmDriver.verify_units`` checks it against LeRobot on the live arm.
-    """
-    cal = calibration[joint]
-    lo, hi = cal.range_min, cal.range_max
-    if joint == GRIPPER:  # MotorNormMode.RANGE_0_100
-        return (min(hi, max(lo, tick)) - lo) / (hi - lo) * 100.0
-    return (tick - (lo + hi) / 2) * 360 / RESOLUTION_MINUS_1
-
-
 @dataclasses.dataclass
 class SafetyEnvelope:
     """Absolute per-joint bounds, in the units the policy emits.
 
-    The calibrated range is *narrower than the servo range* — it is where the operator
-    swept each joint during calibration, i.e. where the arm can actually go without
-    meeting a hard stop. A policy is free to emit an action outside it, so this is the
-    difference between clipping a command and driving into a mechanical limit.
+    Built from the travel the environment reports, less a margin. Those limits are narrower than
+    whatever the device is mechanically capable of — on a real arm they are where the operator
+    swept each joint, i.e. where it can go without meeting a hard stop. A policy is free to emit
+    an action outside them, so this is the difference between clipping a command and driving into
+    a limit.
     """
 
     limits: dict[str, tuple[float, float]]
     clipped: dict[str, int]
 
     @classmethod
-    def from_calibration(cls, calibration, arm_margin_deg: float, gripper_margin: float):
-        limits = {}
+    def from_limits(cls, limits: dict[str, tuple[float, float]], arm_margin_deg: float,
+                    gripper_margin: float):
+        """Shrink each joint's reported travel by a margin, in the units actions arrive in.
+
+        No conversion happens here. The environment reports its limits in the same space the
+        policy emits, so this only steps back from the ends.
+        """
+        bounds = {}
         for joint in JOINTS:
-            lo = _normalized_from_tick(calibration, joint, calibration[joint].range_min)
-            hi = _normalized_from_tick(calibration, joint, calibration[joint].range_max)
+            lo, hi = limits[joint]
             margin = gripper_margin if joint == GRIPPER else arm_margin_deg
-            if hi - lo <= 2 * margin:
+            lo, hi = lo + margin, hi - margin
+            if lo >= hi:
                 raise Abort(
-                    f"{joint}: calibrated range {lo:.1f}..{hi:.1f} is narrower than twice "
-                    f"the {margin} margin — check the calibration"
+                    f"{joint}: travel {limits[joint]} is narrower than twice "
+                    f"the {margin} margin — check the environment's limits"
                 )
-            limits[joint] = (lo + margin, hi - margin)
-        return cls(limits=limits, clipped={j: 0 for j in JOINTS})
+            bounds[joint] = (lo, hi)
+        return cls(limits=bounds, clipped={j: 0 for j in JOINTS})
 
     def clamp(self, joint: str, value: float) -> float:
         lo, hi = self.limits[joint]
@@ -326,25 +230,110 @@ class SafetyEnvelope:
         return [j for j in JOINTS if not self.limits[j][0] <= pose[j] <= self.limits[j][1]]
 
 
-def sanity_check_calibration(calibration) -> list[str]:
-    """Reject a calibration that cannot be the one the dataset was recorded in.
+def sanity_check_limits(limits: dict[str, tuple[float, float]]) -> list[str]:
+    """Reject limits no environment should report, whatever it is.
 
-    ``wrist_roll`` is legitimately a full turn — ``SOFollower.calibrate`` hard-codes
-    0..4095 for it and sweeps every other joint. So a *second* full-span joint means the
-    sweep never captured that joint's limits, which is exactly what a known-bad
-    calibration on this hardware looked like.
+    Only the unit-agnostic check lives here: a range must be a range. Whether a range is
+    *plausible* for a given device is the environment's own business, because only it knows what
+    its own uncalibrated state looks like, and it refuses rather than reporting one.
     """
     problems = []
     for joint in JOINTS:
-        cal = calibration[joint]
-        if cal.range_max <= cal.range_min:
-            problems.append(f"{joint}: range_max {cal.range_max} <= range_min {cal.range_min}")
-        elif joint != "wrist_roll" and (cal.range_min, cal.range_max) == (0, RESOLUTION_MINUS_1):
-            problems.append(
-                f"{joint}: a full 0..{RESOLUTION_MINUS_1} range means its limits were "
-                f"never captured during calibration"
-            )
+        if joint not in limits:
+            problems.append(f"{joint}: no limits reported")
+            continue
+        lo, hi = limits[joint]
+        if hi <= lo:
+            problems.append(f"{joint}: upper limit {hi} <= lower limit {lo}")
     return problems
+
+
+def _torque_is_off(state: dict[str, int] | None) -> bool:
+    """Is torque *known* to be off, from a reading rather than from having asked?
+
+    Three inputs, three meanings, and the middle one is why this is a function rather than an
+    inline `all()`:
+
+    * ``None`` — this environment has no notion of torque. Nothing is holding, by construction.
+    * ``{}`` — the state could not be read. **Not** released: `all()` over an empty dict is
+      vacuously true, which would turn the one reading that means "the bus went quiet" into
+      proof of the thing it failed to measure.
+    * a populated dict — released only if every joint reads zero.
+    """
+    if state is None:
+        return True
+    return bool(state) and all(value == 0 for value in state.values())
+
+
+def force_torque_off(env: Environment, attempts: int = 4) -> dict[str, int] | None:
+    """Drop torque and **verify** it, retrying. Never raises. Returns the last state read.
+
+    Verified rather than assumed, because this is the one operation the whole file exists to
+    guarantee. Two things make a single unverified write insufficient: a Feetech write can fail
+    transiently at 1 Mbaud, and a servo that browns out during a write sequence comes back with
+    its EEPROM default — which on this arm is torque *enabled*. So a release that is not read
+    back is not a release.
+
+    Takes an environment rather than living on ``ArmDriver``, because the arm can already be
+    energised from an earlier run at a point where no driver exists yet — the driver needs an
+    envelope, which needs limits, which need a connected environment. Releasing must not wait
+    for that.
+    """
+    state: dict[str, int] | None = {}
+    for attempt in range(attempts):
+        try:
+            env.disable_torque()
+        except Exception as exc:  # noqa: BLE001 - keep going, then check
+            print(
+                f"WARNING: disable_torque attempt {attempt + 1} failed: {exc!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+        try:
+            state = env.torque_state()
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"WARNING: could not read back torque state: {exc!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(0.2)
+            continue
+        if _torque_is_off(state):
+            return state
+        still_on = [j for j, v in state.items() if v]
+        if still_on:
+            why = f"torque still enabled on {still_on}"
+        else:
+            # An empty read-back, so nothing was confirmed either way. The retry is the point:
+            # this is the reading that must not be mistaken for a release.
+            why = "torque state read back empty, so the release is unverified"
+        remaining = attempts - attempt - 1
+        print(
+            f"WARNING: {why} after attempt {attempt + 1}/{attempts}"
+            f"{'; retrying' if remaining else ''}",
+            file=sys.stderr,
+            flush=True,
+        )
+        time.sleep(0.2)
+    return state
+
+
+def report_torque(state: dict[str, int] | None) -> None:
+    """Say, in operator terms, whether the arm is limp. The last line of any run that drove."""
+    if state is None:
+        print("this environment has no torque to release", flush=True)
+    elif _torque_is_off(state):
+        print("torque off, verified on all six joints", flush=True)
+    else:
+        # The arm may still be holding a pose and software has run out of ways to stop it.
+        # Say so in the strongest terms available.
+        print(
+            f"ERROR: COULD NOT RELEASE TORQUE — read back {state or 'nothing'}. "
+            f"The arm may still be energised. CUT POWER TO THE ARM.",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +371,7 @@ class ArmDriver:
 
     def __init__(
         self,
-        robot,
+        env: Environment,
         envelope: SafetyEnvelope,
         *,
         no_motion: bool,
@@ -390,13 +379,12 @@ class ArmDriver:
         deadband_deg: float = 0.0,
         deadband_gripper: float = 0.0,
     ):
-        self.robot = robot
-        self.bus = robot.bus
+        self.env = env
         self.envelope = envelope
         self.no_motion = no_motion
         self.engaged = False
         self.last_commanded: dict[str, float] | None = None
-        self.final_torque_state: dict[str, int] = {}
+        self.final_torque_state: dict[str, int] | None = {}
         self.settle_timeout_s = settle_timeout_s
         self.return_residual: float | None = None
         self.deadband_deg = deadband_deg
@@ -407,42 +395,20 @@ class ArmDriver:
         self.last_temp: dict[str, int] = {}
         self.temp_log: list[dict] = []
 
-    def verify_units(self) -> dict:
-        """Check our normalization against LeRobot's, on the live arm, before torque.
-
-        The guard for the one bug in this file that would otherwise be silent: a units
-        mismatch drives the arm confidently to the wrong pose, with a workflow that
-        reports success.
-        """
-        raw = self.bus.sync_read("Present_Position", normalize=False)
-        norm = self.bus.sync_read("Present_Position", normalize=True)
-        report, worst = {}, 0.0
-        for joint in JOINTS:
-            ours = _normalized_from_tick(self.bus.calibration, joint, raw[joint])
-            delta = abs(ours - norm[joint])
-            worst = max(worst, delta)
-            report[joint] = {
-                "tick": raw[joint],
-                "lerobot": round(norm[joint], 4),
-                "ours": round(ours, 4),
-                "delta": round(delta, 5),
-            }
-        if worst >= 0.01:
-            raise Abort(
-                f"unit conversion disagrees with LeRobot by up to {worst:.4f} — refusing "
-                f"to drive the arm: {json.dumps(report)}"
-            )
-        return report
-
     def present(self) -> dict[str, float]:
-        return self.bus.sync_read("Present_Position")
+        return self.env.present_position()
 
     def observe(self) -> dict:
         """Joint positions plus one frame per camera, in the units the policy speaks."""
-        return self.robot.get_observation()
+        return self.env.get_observation()
 
-    def torque_state(self) -> dict[str, int]:
-        return self.bus.sync_read("Torque_Enable", normalize=False)
+    def torque_state(self) -> dict[str, int] | None:
+        """Per-joint torque-enable, passed through unflattened. See `_torque_is_off`.
+
+        None and `{}` are both falsy and mean opposite things, so every caller here goes through
+        `_torque_is_off` rather than testing the dict.
+        """
+        return self.env.torque_state()
 
     # Above the servos' Max_Temperature_Limit (register 0x0D), which the vendor memory table
     # documents in degrees Celsius and which reads 70 on this arm. A value past it is a
@@ -454,8 +420,12 @@ class ArmDriver:
     # second apart. Thermal mass makes a larger jump impossible; a wrong byte makes it easy.
     MAX_TEMP_SLEW_C = 6
 
-    def temperatures(self) -> dict[str, int]:
+    def temperatures(self) -> dict[str, int] | None:
         """Servo temperatures, with physically impossible readings dropped.
+
+        Returns None when the environment does not model heat at all — distinct from `{}`, which
+        means a reading was attempted and every value was rejected. The first means there is
+        nothing to manage; the second means the bus went quiet and the arm must be assumed hot.
 
         Two filters, because the obvious one is not the useful one. An absolute ceiling
         catches a reading of 150 C, but every *ambiguous* reading this arm has produced sat
@@ -470,7 +440,9 @@ class ArmDriver:
         Every reading is also recorded, so a run answers the question "was it ever really
         hot" from its own trace instead of from a maximum that one bad read can inflate.
         """
-        raw = self.bus.sync_read("Present_Temperature", normalize=False)
+        raw = self.env.temperatures()
+        if raw is None:
+            return None
         clean, dropped = {}, {}
         for joint, value in raw.items():
             if value is None or not 0 < value < self.IMPLAUSIBLE_TEMP_C:
@@ -506,22 +478,26 @@ class ArmDriver:
         ceiling is cleared would stop and start every few seconds; the gap is the
         hysteresis that makes a rest an actual rest.
         """
-        def hottest_now() -> int:
+        def hottest(reading: dict[str, int] | None) -> int:
             # An empty reading means every joint's value was rejected as corruption. Treat
             # that as "still hot" rather than "cool": resuming on a bus that cannot be read
             # would mean resuming with no thermal protection at all.
-            reading = self.temperatures()
             return max(reading.values()) if reading else self.IMPLAUSIBLE_TEMP_C
 
         start = time.perf_counter()
         temps = self.temperatures()
+        if temps is None:
+            # Nothing to wait for, and waiting would time out and abort a healthy run. Reaching
+            # here at all means something upstream asked a heatless environment to cool.
+            print("this environment does not report temperature; nothing to rest for", flush=True)
+            return {"rested_s": 0.0, "peak": {}, "resumed_at": {}}
         peak = dict(temps)
         print(
             f"resting until every servo is under {resume_c}C (now "
             f"{max(temps.values()) if temps else 'unreadable'}C, torque off)",
             flush=True,
         )
-        while (max(temps.values()) if temps else self.IMPLAUSIBLE_TEMP_C) >= resume_c:
+        while hottest(temps) >= resume_c:
             if _stop.is_set():
                 raise Abort("stop requested while resting")
             waited = time.perf_counter() - start
@@ -533,52 +509,19 @@ class ArmDriver:
             time.sleep(poll_s)
             temps = self.temperatures()
             if int(waited) % 30 < poll_s:
-                print(f"  resting, {waited:.0f}s elapsed, hottest {hottest_now()}C", flush=True)
+                # The reading just taken, not a fresh one: an extra read would move the slew
+                # filter's baseline, so a progress line would change the next real decision.
+                print(f"  resting, {waited:.0f}s elapsed, hottest {hottest(temps)}C", flush=True)
         rested = time.perf_counter() - start
-        print(f"cooled to {max(temps.values())}C after {rested:.0f}s; resuming", flush=True)
+        print(f"cooled to {hottest(temps)}C after {rested:.0f}s; resuming", flush=True)
         self.hot_streak = 0
         return {"rested_s": round(rested, 1), "peak": peak, "resumed_at": temps}
 
-    def force_torque_off(self, attempts: int = 4) -> dict[str, int]:
-        """Drop torque and **verify** it, retrying. Never raises.
-
-        Verified rather than assumed, because this is the one operation the whole file
-        exists to guarantee. Two things make a single unverified write insufficient: a
-        Feetech write can fail transiently at 1 Mbaud, and a servo that browns out during
-        a write sequence comes back with its EEPROM default — which on this arm is torque
-        *enabled*. So a release that is not read back is not a release.
-        """
-        state: dict[str, int] = {}
-        for attempt in range(attempts):
-            try:
-                self.bus.disable_torque(num_retry=2)
-            except Exception as exc:  # noqa: BLE001 - keep going, then check
-                print(
-                    f"WARNING: disable_torque attempt {attempt + 1} failed: {exc!r}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            try:
-                state = self.torque_state()
-            except Exception as exc:  # noqa: BLE001
-                print(
-                    f"WARNING: could not read back torque state: {exc!r}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                time.sleep(0.2)
-                continue
-            if all(v == 0 for v in state.values()):
-                self.engaged = False
-                return state
-            still_on = [j for j, v in state.items() if v]
-            print(
-                f"WARNING: torque still enabled on {still_on} after attempt "
-                f"{attempt + 1}/{attempts}; retrying",
-                file=sys.stderr,
-                flush=True,
-            )
-            time.sleep(0.2)
+    def force_torque_off(self, attempts: int = 4) -> dict[str, int] | None:
+        """Drop torque and verify it. Never raises. See `force_torque_off` at module level."""
+        state = force_torque_off(self.env, attempts)
+        if _torque_is_off(state):
+            self.engaged = False
         return state
 
     def engage(self, acceleration: int, speed: int, attempts: int = 3) -> None:
@@ -598,7 +541,13 @@ class ArmDriver:
             try:
                 self._engage_once(acceleration, speed)
                 return
-            except (ConnectionError, OSError) as exc:
+            except Abort:
+                raise
+            except Exception as exc:  # noqa: BLE001 - see below; the release is what matters
+                # Every exception, not a list of the ones seen so far. A servo that answers with
+                # an error byte raises RuntimeError, and a named-exception list let that escape
+                # this loop — skipping the forced release between attempts, which is the reason
+                # the loop exists at all.
                 last_exc = exc
                 print(
                     f"WARNING: engage attempt {attempt + 1}/{attempts} failed on the servo "
@@ -611,23 +560,22 @@ class ArmDriver:
         raise Abort(f"could not enable torque safely after {attempts} attempts: {last_exc!r}")
 
     def _engage_once(self, acceleration: int, speed: int) -> None:
-        # Torque off first, but only if it is actually on: a previous run may have left it
-        # holding a goal, in which case "present" would be that goal rather than a resting
-        # pose. Skipping the redundant case halves the writes in this sequence, and this
-        # sequence is where the bus has been seen to drop one — `configure()` disables
-        # again on its own way in, so nothing is lost.
-        if any(self.torque_state().values()):
-            self.bus.disable_torque(num_retry=2)
+        # Torque off first, unless it is known to be off already: a previous run may have left
+        # it holding a goal, in which case "present" would be that goal rather than a resting
+        # pose. Skipping the provably-redundant case halves the writes in this sequence, and
+        # this sequence is where the bus has been seen to drop one — `configure()` disables
+        # again on its own way in, so nothing is lost. A read that came back empty is not
+        # proof, so it writes.
+        if not _torque_is_off(self.torque_state()):
+            self.env.disable_torque()
         present = self.present()
-        self.bus.sync_write("Goal_Position", present)
+        self.env.write_goal(present)
 
         # Re-enables torque on the way out, now onto a goal equal to the present pose.
         # Note it re-enables from a `finally`, so a failure inside it can leave torque on
         # — which is why the caller forces it off between attempts.
-        self.robot.configure()
-        for joint in JOINTS:
-            self.bus.write("Acceleration", joint, acceleration, num_retry=2)
-            self.bus.write("Goal_Velocity", joint, speed, num_retry=2)
+        self.env.configure()
+        self.env.set_motion_limits(acceleration, speed)
 
         self.engaged = True
         self.last_commanded = present
@@ -667,7 +615,7 @@ class ArmDriver:
         self.last_commanded = clamped
         if self.no_motion:
             return clamped
-        sent = self.robot.send_action({f"{j}.pos": v for j, v in clamped.items()})
+        sent = self.env.send_action({f"{j}.pos": v for j, v in clamped.items()})
         return {k.removesuffix(".pos"): v for k, v in sent.items()}
 
     def ramp_to(self, target: dict[str, float], seconds: float, hz: float = 30.0) -> None:
@@ -678,8 +626,7 @@ class ArmDriver:
         steps = max(1, int(seconds * hz))
         for i in range(1, steps + 1):
             frac = i / steps
-            self.bus.sync_write(
-                "Goal_Position",
+            self.env.write_goal(
                 {
                     joint: self.envelope.clamp(
                         joint, start[joint] + frac * (target[joint] - start[joint])
@@ -711,10 +658,11 @@ class ArmDriver:
     def release(self, home: dict[str, float] | None, seconds: float) -> None:
         """Return to `home` and drop torque. Must not raise, and must not be skipped.
 
-        Deliberately built out of raw bus calls. LeRobot's ``disconnect()`` is gated on
-        ``is_connected``, which includes the cameras, so a camera that failed would make
-        the release path itself raise — leaving the arm holding a pose, which is the
-        failure this whole file is arranged around.
+        Built out of the environment's release-path members, each of which is specified to
+        tolerate being called on a device that has already failed. That is the requirement:
+        LeRobot's own ``disconnect()`` is gated on ``is_connected``, which includes the
+        cameras, so routing a release through it would let a camera that dropped out raise —
+        leaving the arm holding a pose, the failure this whole file is arranged around.
 
         **Torque-off is attempted whether or not this driver believes it engaged.** An
         engage that fails part-way leaves torque indeterminate, and that is exactly the
@@ -750,17 +698,7 @@ class ArmDriver:
         finally:
             state = self.force_torque_off()
             self.final_torque_state = state
-            if state and all(v == 0 for v in state.values()):
-                print("torque off, verified on all six joints", flush=True)
-            else:
-                # The arm may still be holding a pose and software has run out of ways to
-                # stop it. Say so in the strongest terms available.
-                print(
-                    f"ERROR: COULD NOT RELEASE TORQUE — read back {state or 'nothing'}. "
-                    f"The arm may still be energised. CUT POWER TO THE ARM.",
-                    file=sys.stderr,
-                    flush=True,
-                )
+            report_torque(state)
 
 
 # ---------------------------------------------------------------------------
@@ -986,7 +924,9 @@ def run_interval(index, seconds, arm, policy, rate, args, trace, records) -> Non
     start_pose = arm.present()
     state = {
         "ended": "completed", "note": "",
-        "steps": 0, "replans": 0, "max_temp_c": 0, "hottest_temps": {}, "ramp_s": 0.0,
+        # None, not 0: an environment that does not report heat has no peak, and a zero here
+        # would read as a measurement of a cool arm.
+        "steps": 0, "replans": 0, "max_temp_c": None, "hottest_temps": {}, "ramp_s": 0.0,
     }
     # Commanded-versus-achieved, sampled once per chunk. This arm does not reach what it
     # is told — unevenly, per joint — so the gap is a first-class result, not a detail.
@@ -1017,12 +957,16 @@ def run_interval(index, seconds, arm, policy, rate, args, trace, records) -> Non
             # holding. Joints carrying gravity load heat fastest, so this is what bounds a
             # long session rather than the clock.
             temps = arm.temperatures()
-            if not temps:
+            if temps is None:
+                # No heat to manage in this environment. Distinct from the empty case below, and
+                # `max_temp_c` stays None rather than reporting a cool arm it never measured.
+                pass
+            elif not temps:
                 # Every joint's reading was rejected: the bus is unhealthy, not the arm hot.
                 arm.hot_streak = 0
             else:
                 hottest = max(temps.values())
-                if hottest > state["max_temp_c"]:
+                if state["max_temp_c"] is None or hottest > state["max_temp_c"]:
                     state["max_temp_c"] = hottest
                     # Which joint, not just how hot. The maximum alone does not say where
                     # the heat is, and on this arm it has been one joint at a time.
@@ -1349,9 +1293,10 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
     output = pathlib.Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
-    from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
-    from lerobot.motors import MotorCalibration
-    from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
+    # The one line that names an implementation. Everything after it is the interface, so running
+    # against a simulator means a different module injected beside this file.
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    from so101_environment import SO101Environment  # noqa: PLC0415 - injected beside this file
 
     # A cancelled workflow arrives as SIGTERM, which is the operator's way to stop a run
     # early: it unwinds through the same return-and-release path a timeout does.
@@ -1371,9 +1316,9 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
         "intervals": records,
     }
     arm = None
+    env = None
     envelope = None
     rate = RateLimiter(args.control_hz)
-    cameras_connected = []
 
     policy = PolicyLink(
         args.policy_host,
@@ -1393,96 +1338,108 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
         results["policy_wait_s"] = round(policy.wait_until_ready(args.policy_wait_s), 1)
         policy.open_for_setup()
 
-        # ---- 2. the cameras, resolved but not yet opened ---------------------
-        # Resolution happens here rather than at parse time because it reads the machine,
-        # and it happens before the bus so a stale selector fails with the arm untouched.
-        # Each account is printed so the log records which physical device was opened, not
-        # which one the spec asked for.
-        resolved_cameras = {}
-        for name, spec in camera_specs.items():
-            device, account = _resolve_camera_spec(spec)
-            resolved_cameras[name] = device
-            print(f"camera {name}: {account}", flush=True)
-        results["cameras"] = {name: str(d) for name, d in resolved_cameras.items()}
-
-        # ---- 3. the robot bus ------------------------------------------------
-        calibration = None
-        if args.calibration_dir:
-            path = pathlib.Path(args.calibration_dir) / f"{args.robot_id}.json"
-            raw = json.loads(path.read_text())
-            calibration = {j: MotorCalibration(**raw[j]) for j in JOINTS}
-            print(f"calibration file: {path}", flush=True)
-
-        robot = SO101Follower(
-            SO101FollowerConfig(
+        # ---- 2. the environment, selected but not opened ---------------------
+        # Constructing it picks the hardware — the port, the calibration file, and which capture
+        # device each camera name means — and opens nothing, so a stale camera selector or a
+        # missing calibration file fails here with the arm untouched.
+        try:
+            env = SO101Environment(
                 port=args.robot_port,
-                id=args.robot_id,
-                calibration_dir=(
-                    pathlib.Path(args.calibration_dir) if args.calibration_dir else None
-                ),
-                # Applied inside send_action against the present position, so it caps how
-                # fast a joint can be driven regardless of what the policy asks for.
-                max_relative_target={
-                    **{j: args.max_step_deg for j in ARM_JOINTS},
-                    GRIPPER: args.max_step_gripper,
-                },
-                cameras={
-                    name: OpenCVCameraConfig(
-                        index_or_path=device,
-                        fps=args.camera_fps,
-                        width=args.camera_width,
-                        height=args.camera_height,
-                    )
-                    for name, device in resolved_cameras.items()
-                },
+                robot_id=args.robot_id,
+                camera_specs=camera_specs,
+                camera_width=args.camera_width,
+                camera_height=args.camera_height,
+                camera_fps=args.camera_fps,
+                calibration_dir=args.calibration_dir or None,
             )
+        except ValueError as exc:
+            raise Abort(str(exc)) from exc
+
+        # What each camera name actually reads, not what it was asked to read. Published, because
+        # a name alone does not say which device produced the frames a result came from.
+        results["cameras"] = env.camera_sources()
+        for name, source in results["cameras"].items():
+            print(f"camera {name}: {source}", flush=True)
+
+        # ---- 3. open it ------------------------------------------------------
+        # connect() makes every member usable and does no more: LeRobot's own connect() would run
+        # configure(), which enables torque, before any of the checks below can refuse.
+        env.connect()
+        print(
+            f"environment connected, {len(results['cameras'])} camera(s) open",
+            flush=True,
         )
 
-        # Not robot.connect(): that runs configure(), which enables torque, before any of
-        # the checks below have had a chance to refuse.
-        robot.bus.connect()
-        print(f"bus open on {args.robot_port}, six motors answered", flush=True)
-
-        if calibration is not None:
-            if not robot.bus.is_calibrated:
-                raise Abort(
-                    "the servos' EEPROM does not match the calibration file, so the arm "
-                    "is not in the joint frame the dataset was recorded in — refusing to "
-                    "drive it"
-                )
-            print("EEPROM matches the calibration file", flush=True)
+        # Asked unconditionally: whether the question means anything is the environment's answer
+        # to give, not something to infer from the flags this run was started with.
+        matches = env.is_calibrated()
+        if matches is None:
+            print("no calibration was claimed; the device's own frame is in use", flush=True)
+        elif not matches:
+            raise Abort(
+                "the device's stored calibration does not match the calibration file, so "
+                "the arm is not in the joint frame the dataset was recorded in — refusing "
+                "to drive it"
+            )
         else:
-            calibration = robot.bus.read_calibration()
-            robot.bus.calibration = calibration
-            print("calibration read from the servos", flush=True)
+            print("stored calibration matches the calibration file", flush=True)
 
-        problems = sanity_check_calibration(calibration)
+        # In the units actions arrive in. Whatever the device stores internally is its own
+        # business and never reaches here.
+        try:
+            limits = env.joint_limits()
+        except ValueError as exc:
+            # The environment refusing its own limits is an operator-facing abort, not a crash:
+            # a traceback here would bury the one sentence that says what to re-calibrate.
+            raise Abort(f"the environment reports unusable joint limits: {exc}") from exc
+        problems = sanity_check_limits(limits)
         if problems:
-            raise Abort("calibration is not usable: " + "; ".join(problems))
-        results["calibration"] = {j: dataclasses.asdict(c) for j, c in calibration.items()}
+            raise Abort("reported joint limits are not usable: " + "; ".join(problems))
+        results["joint_limits"] = {j: [round(v, 2) for v in lim] for j, lim in limits.items()}
+        print("joint limits reported by the environment:", flush=True)
+        for joint, (lo, hi) in limits.items():
+            print(f"  {joint:<14} {lo:>8.2f} .. {hi:>8.2f}", flush=True)
 
-        envelope = SafetyEnvelope.from_calibration(
-            calibration, args.joint_margin_deg, args.gripper_margin
+        envelope = SafetyEnvelope.from_limits(
+            limits, args.joint_margin_deg, args.gripper_margin
         )
         results["envelope"] = {j: [round(v, 2) for v in lim] for j, lim in envelope.limits.items()}
-        print("safety envelope:", flush=True)
+        print("safety envelope, those limits less the margin:", flush=True)
         for joint, (lo, hi) in envelope.limits.items():
             print(f"  {joint:<14} {lo:>8.2f} .. {hi:>8.2f}", flush=True)
 
+        # The other half of the clamp: the envelope bounds where a command may be, this bounds
+        # how far one may move from where the arm is. Enforced inside the environment, against a
+        # position it reads itself, so it holds for whatever the policy emits.
+        step_limit = {**{j: args.max_step_deg for j in ARM_JOINTS}, GRIPPER: args.max_step_gripper}
+        env.set_step_limit(step_limit)
+        results["step_limit"] = step_limit
+        print(
+            f"per-step limit: {args.max_step_deg} deg per arm joint, "
+            f"{args.max_step_gripper} for the gripper",
+            flush=True,
+        )
+
         arm = ArmDriver(
-            robot,
+            env,
             envelope,
             no_motion=args.no_motion,
             settle_timeout_s=args.release_settle_s,
             deadband_deg=args.command_deadband_deg,
             deadband_gripper=args.command_deadband_gripper,
         )
-        results["units_check"] = arm.verify_units()
-        print("unit conversion agrees with LeRobot on all six joints", flush=True)
+        results["is_physical"] = env.is_physical()
 
         entry_torque = arm.torque_state()
         results["entry_torque"] = entry_torque
-        energised = [j for j, v in entry_torque.items() if v]
+        if entry_torque == {}:
+            print(
+                "WARNING: could not read whether torque is already enabled; proceeding as if "
+                "it is not, so engage will drop it before re-enabling onto the present pose",
+                file=sys.stderr,
+                flush=True,
+            )
+        energised = [j for j, v in (entry_torque or {}).items() if v]
         if energised and args.no_motion:
             # no-motion promises not to write to the bus at all, so it cannot fix this —
             # and it must not proceed while the arm is holding a pose it did not command.
@@ -1511,23 +1468,20 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
                 flush=True,
             )
 
-        # ---- 4. the cameras, opened ------------------------------------------
-        for name, cam in robot.cameras.items():
-            cam.connect()
-            cameras_connected.append(cam)
-            print(f"camera {name} open", flush=True)
-
-        # ---- 5. warm-up, with the arm still limp ------------------------------
+        # ---- 4. warm-up, with the arm still limp ------------------------------
         # The whole policy path — observation shape, dtypes, server-side validation, chunk
         # length, and whether the returned actions are even inside the arm's reachable
         # range — is exercised here, before torque. If any of it is wrong, the run ends
         # with the arm untouched.
-        obs = robot.get_observation()
+        #
+        # Through the environment, like every other observation. Reading the same data by a
+        # second route is how the warm-up comes to validate a path the loop does not take.
+        obs = env.get_observation()
         payload = policy.payload_bytes(obs, args.lang_instruction)
         results["observation_bytes"] = payload
         print(
             f"observation payload: {payload / 1e6:.2f} MB per request "
-            f"({args.camera_width}x{args.camera_height} raw uint8 x{len(resolved_cameras)})",
+            f"({args.camera_width}x{args.camera_height} raw uint8 x{len(camera_specs)})",
             flush=True,
         )
         # The shape actually going on the wire, as the server will see it after a msgpack
@@ -1591,7 +1545,7 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
                 flush=True,
             )
 
-        # ---- 6. the control loop ------------------------------------------------
+        # ---- 5. the control loop ------------------------------------------------
         policy.close()
         policy.open_for_loop()
         print(f"switching to the control-loop timeout of {args.policy_timeout_ms} ms", flush=True)
@@ -1637,11 +1591,13 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
                     )
                     continue
                 spent += records[-1]["duration_s"]
+                peak = records[-1]["max_temp_c"]
+                heat = f"hottest {peak}C, " if peak is not None else ""
                 print(
                     f"interval {index}: {records[-1]['ended']} "
                     f"({records[-1]['steps']} steps at {records[-1]['achieved_hz']} Hz over "
                     f"{records[-1]['driven_s']:.0f}s driving, "
-                    f"hottest {records[-1]['max_temp_c']}C, "
+                    f"{heat}"
                     f"{spent:.0f}/{args.run_duration_s:g}s used)",
                     flush=True,
                 )
@@ -1655,13 +1611,25 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
         raise
     finally:
         # The one thing that must always happen.
+        final_state: dict[str, int] | None = {}
         if arm is not None:
             arm.release(arm.last_commanded, args.release_ramp_s)
-        for cam in cameras_connected:
+            final_state = arm.final_torque_state
+        elif env is not None and not args.no_motion:
+            # Connected, but bring-up failed before there was a driver — a camera that would not
+            # open, unusable limits, a refused calibration. Nothing here drove the arm, but it may
+            # have arrived energised from an earlier run, and that is exactly when a release must
+            # not be skipped. No return ramp: nothing knows where this run would have started.
+            final_state = force_torque_off(env)
+            report_torque(final_state)
+        # After the release, never before it: closing the environment is housekeeping and
+        # dropping torque is not. disconnect() is specified to tolerate a partly-open
+        # environment, which is what this path always has.
+        if env is not None:
             try:
-                cam.disconnect()
-            except Exception:  # noqa: BLE001,S110 - teardown, nothing left to salvage
-                pass
+                env.disconnect()
+            except Exception as exc:  # noqa: BLE001 - teardown, and torque is already off
+                print(f"WARNING: disconnect failed: {exc!r}", file=sys.stderr, flush=True)
         policy.close()
 
         # No success field, and no count of anything, by design. Whether the policy did
@@ -1678,9 +1646,13 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
             "no_motion": args.no_motion,
             # Read back off the servos, not inferred from having asked. This is the field
             # to check first after any run that ended badly.
-            "final_torque_state": arm.final_torque_state if arm else {},
+            "final_torque_state": final_state,
             "return_residual": arm.return_residual if arm else None,
-            "max_temp_c": max((e.get("max_temp_c") or 0) for e in records) if records else None,
+            # None when nothing was ever measured, rather than a zero standing in for one.
+            "max_temp_c": max(
+                (e["max_temp_c"] for e in records if e.get("max_temp_c") is not None),
+                default=None,
+            ),
             "rests": len(results.get("rests") or []),
             "bad_temp_reads": arm.bad_temp_reads if arm else 0,
             "temp_peak_accepted": (
@@ -1688,11 +1660,9 @@ def main() -> int:  # noqa: PLR0915 - a linear bring-up sequence, ordered by ris
                 if arm and arm.temp_log else None
             ),
             "rested_s": round(sum(r["rested_s"] for r in (results.get("rests") or [])), 1),
-            "torque_released": bool(arm is None or args.no_motion)
-            or (
-                bool(arm.final_torque_state)
-                and all(v == 0 for v in arm.final_torque_state.values())
-            ),
+            # env is None means nothing was ever opened, so there was nothing to release. An arm
+            # that WAS opened is judged on the read-back, whether or not it got as far as driving.
+            "torque_released": bool(args.no_motion or env is None) or _torque_is_off(final_state),
         }
         # The whole temperature series, not just a maximum. A maximum over hundreds of
         # reads is inflated by any single bad one, which is precisely how an unconfirmed

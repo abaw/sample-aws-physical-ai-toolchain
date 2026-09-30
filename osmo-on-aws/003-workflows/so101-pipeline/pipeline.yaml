@@ -744,9 +744,16 @@ workflow:
       - url: "{{ storage_url }}/hil/{{ model }}/{{workflow_id}}/"
       files:
       # The robot client is shared and model-independent, and is not selected by the model
-      # variable. There is exactly one copy of it in the repo.
+      # variable.
       - localpath: robot/eval_so101_bounded.py
         path: /tmp/eval_so101_bounded.py
+      # What the client drives, and the interface it drives through. The interface is the
+      # robot's, not this spec's; running against a simulator means a different implementation
+      # of it here, with nothing else in this file changing.
+      - localpath: robot/environment.py
+        path: /tmp/environment.py
+      - localpath: robot/so101_environment.py
+        path: /tmp/so101_environment.py
       # The transport IS the model's choice, so it comes from the model directory.
       - localpath: models/{{ model }}/client_transport.sh
         path: /tmp/client_transport.sh
