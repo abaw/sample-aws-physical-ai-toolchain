@@ -161,15 +161,29 @@ publishes nothing.**
 ## Inference latency, measured
 
 **Decoding is autoregressive, so latency depends on what the policy emits.** This is the single most
-important thing to know about serving pi0-FAST, and it is easy to measure wrongly: an under-trained
-checkpoint emits a near-constant pose, terminates decoding early, and looks fast.
+important thing to know about serving pi0-FAST, and it is easy to measure wrongly in either
+direction: how long the checkpoint trained moves the figure by an order of magnitude, up and down.
 
 Measured on one L40S, local inference only:
 
 | checkpoint | local p50 | note |
 |---|---|---|
+| barely trained (200 steps) | **~4.6 s** | 4,824 ms round trip; see below |
 | under-trained (predicts a constant) | **161 ms** | not representative — measure on a trained one |
+| trained, 40,000 steps | **~407 ms** | inferred from a 664 ms round trip less ~257 ms of network |
 | trained, 17 epochs | **~546 ms** | inferred from an 804 ms round trip less ~257 ms of network |
+
+**Under-training is slow at one end and fast at the other, and the slow end looks like a broken
+deployment.** A checkpoint trained just enough to collapse onto a constant pose emits the stop token
+immediately and is the 161 ms row. A checkpoint trained far less than that — 200 steps, which this
+pipeline produces in minutes as a plumbing test — appears never to emit it, so decoding runs to its
+cap and the round trip is **6x slower than a properly trained policy**. On a 1,500 ms control-loop
+timeout it times out on every request and the run aborts before it drives.
+
+The symptom points away from the cause: a multi-second round trip reads as a network or payload
+problem. It is not. The same transport and the same 1.84 MB payload measured 496 ms with another
+policy on the same link, minutes apart. **Before investigating latency, check how long the
+checkpoint trained.**
 
 End-to-end on a cloud-GPU-to-on-premise-arm link, at `action_horizon: 16`:
 

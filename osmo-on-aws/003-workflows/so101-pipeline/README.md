@@ -213,5 +213,6 @@ Most of these are what `submit.sh` exists to prevent; they bite when you assembl
 | `500 Internal server error: Unknown URI scheme:` at submit | an input URL rendered empty. Defaults are placeholder buckets rather than `""` for this reason |
 | A stage fails while the next one completes | a guard that is not an `inputs: - task:` edge is decorative. Failure propagates along edges, never along group order |
 | HIL completes and the arm never moved | `allow_motion` was left false. Confirm with `no_motion` in `results.json` |
+| HIL aborts on `policy server did not answer within …` | the round trip exceeds `policy_timeout_ms`. Read the warm-up figures the client logs. With pi0-FAST, a barely-trained checkpoint decodes to its token cap and is ~6x slower than a trained one, so check training length before suspecting the network |
 | A device is present, correctly owned, and unopenable | the task needs `privileged: true`; the platform's `privileged_allowed` only grants the possibility |
 | A group fails to start under a big checkpoint | OSMO validates resources per *task*, not per group, so an oversized task passes validation and then cannot gang-schedule |
