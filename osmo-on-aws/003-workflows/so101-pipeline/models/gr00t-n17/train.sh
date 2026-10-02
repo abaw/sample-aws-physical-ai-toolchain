@@ -50,7 +50,7 @@ USE_WANDB=0 \
   bash examples/finetune.sh \
     --base-model-path "${BASE_MODEL_PATH:-nvidia/GR00T-N1.7-3B}" \
     --dataset-path "${DS}" \
-    --modality-config-path "$(dirname "$0")/common.py" \
+    --modality-config-path "${MODEL_FILES}/common.py" \
     --embodiment-tag NEW_EMBODIMENT \
     --output-dir "${OUT}"
 

@@ -60,8 +60,7 @@ prefix — not less transfer.
 `models/{{ model }}/train.sh` selects per-model code by path. There is no registry and no conditional on
 the model anywhere in the spec.
 
-A model directory is twelve files. Five are scripts, six are helper slots that **may be empty but must
-exist**, and one declares what belongs to the model rather than to a run:
+A model directory is eight files — six scripts, one shared Python module, and `model.vars`:
 
 ```
 install.sh           SOURCED by every stage; $1 is the stage name
@@ -70,19 +69,17 @@ train.sh             $1 dataset  $2 out  $3 steps  $4 batch  $5 save-freq  $6 se
 score.sh             $1 ckpt  $2 dataset  $3 out  $4 traj-ids  $5 horizon  $6 steps
 serve.sh             $1 ckpt  $2 dataset  $3 port  $4 camera-names
 client_transport.sh  SOURCED by the robot task; exports TRANSPORT_MODULE
-common.py            every stage        may be empty
-prepare_lib.py       prepare            may be empty
-train_lib.py         train              may be empty
-score_lib.py         eval               may be empty
-serve_lib.py         hil                may be empty
-transport.py         both hil tasks     may be empty
-model.vars           runtime image — what the SPEC must know, not what scripts decide
+transport.py         injected into both hil tasks, so the ends agree on the wire; may be empty
+model.vars           the runtime image — what the SPEC must know, not what scripts decide
 ```
 
-**Why the slots are mandatory rather than optional.** A missing `localpath` fails at `validate`, naming the
-path — a good failure, before a node is consumed. An empty one validates fine. So a model that needs no
-helper ships an empty file and pays nothing, and nobody has to write a conditional. Injecting a whole
-directory would be simpler but is not possible: a directory `localpath` fails with `IsADirectoryError`.
+**A model's own code is written by its `install.sh`**, with a heredoc, into `$MODEL_FILES`. So the
+pipeline declares no Python, and a model written in another language carries nothing it does not
+use. Two rules: no Jinja delimiters in any of these files, because OSMO renders them as templates
+(`submit.sh` refuses them); and `--dry-run` does not render payloads, so a template error in a
+model's files only appears on a real submit.
+
+A missing file fails at `validate`, naming the path — a good failure, before a node is consumed.
 
 **The principle: the pipeline passes what it owns, the model owns everything else.** The two models here
 share no flag vocabulary — one exports environment variables and calls a shell launcher after changing

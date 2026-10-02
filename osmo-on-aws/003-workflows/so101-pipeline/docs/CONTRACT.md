@@ -42,14 +42,12 @@ have nothing in common: one takes `NUM_GPUS=… MAX_STEPS=… bash examples/fine
 after changing directory, the other takes `lerobot-train --policy.type=… --batch_size=…`. Any attempt
 to find a shared flag vocabulary fails on the first model added.
 
-## The twelve files
+## The eight files
 
 A model directory is `models/<name>/`. The pipeline selects it by templating the localpath, so
 **`pipeline.yaml` never names a model**. Adding one is a new directory.
 
-**Every one of the twelve must exist.** A missing file fails at `osmo workflow validate`, naming the
-path; an empty one validates and costs nothing. So a model that needs no helper ships an empty file,
-and the pipeline needs no conditional to know which models have which.
+**Every one must exist.** A missing file fails at `osmo workflow validate`, naming the path.
 
 ```
 install.sh           SOURCED by every stage. $1 stage (prepare|train|eval|serve)
@@ -58,17 +56,35 @@ train.sh             $1 dataset  $2 dir-out  $3 steps  $4 batch  $5 save-freq  $
 score.sh             $1 ckpt  $2 dataset  $3 dir-out  $4 traj-ids  $5 horizon  $6 frames
 serve.sh             $1 ckpt  $2 dataset  $3 port  $4 camera-names
 client_transport.sh  SOURCED by the robot task; exports TRANSPORT_MODULE
-common.py            injected into every stage        may be empty
-prepare_lib.py       injected into prepare            may be empty
-train_lib.py         injected into train              may be empty
-score_lib.py         injected into eval               may be empty
-serve_lib.py         injected into hil                may be empty
-transport.py         injected into both hil tasks     may be empty
+transport.py         injected into BOTH hil tasks; may be empty
+model.vars           read by ./submit.sh, never injected
 ```
 
-A helper lands beside the script that uses it, so a plain `import common` works. `common.py` is the
-place for anything two stages must agree on — one model uses it for a camera-name mapping that
-training, scoring and serving all have to apply identically.
+### Anything else the model needs, install.sh writes
+
+A model that needs its own Python — a scorer, a server, a dataset check — writes it from
+`install.sh` with a quoted heredoc, into `$MODEL_FILES` (which `install.sh` creates, exports, and
+puts on `PYTHONPATH`). Gate on `$1` so a stage only writes what it uses.
+
+The pipeline therefore declares no Python at all, and **a model written in any other language
+carries nothing it does not use.** Earlier versions declared a fixed `*_lib.py` slot per stage,
+because OSMO injects one `localpath` at a time and cannot inject a directory — so the only way to
+let a model ship its own files was for the pipeline to pre-declare names for them. That made Python
+part of the contract for no reason, and one slot was empty in every model that ever existed.
+
+Two consequences worth knowing before you write one:
+
+- **No Jinja delimiters anywhere in these files.** OSMO renders every injected file as a template,
+  so an expression or statement opener is consumed before the shell or Python sees it — including
+  inside a comment, and including an f-string that happens to produce a doubled brace. `submit.sh`
+  refuses them; without that check the failure is a 400 quoting a line number in an assembled
+  template you cannot see.
+- **`--dry-run` does not render payloads.** It echoes `localpath` and stops, so a template error in
+  a model's files survives a clean dry run and appears only on a real submit.
+
+`transport.py` is the one exception that stays an injected file: the robot task sources
+`client_transport.sh` and never `install.sh`, so writing the wire format from two separate heredocs
+would reintroduce the drift that one shared file prevents.
 
 Every script receives **every argument it might need, whether it uses it or not**. Ignoring an
 argument is free; being unable to see one is a contract change. All paths are absolute.

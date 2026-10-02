@@ -48,18 +48,16 @@ case "${DS_VERSION}" in
   *)   echo "ERROR: unsupported codebase_version ${DS_VERSION}" >&2; exit 1 ;;
 esac
 
-# modality.json is GR00T-specific and absent from a stock LeRobot dataset. It names the cameras
-# the DATASET has — derived from the recording, never from a workflow variable, because a
-# variable could disagree with what was recorded and the arm would drive on the wrong frames.
-if [ ! -f "${WORK}/meta/modality.json" ]; then
-  cp "${GROOT_DIR}/examples/SO100/modality.json" "${WORK}/meta/modality.json"
-  echo "[gr00t-n17] installed meta/modality.json from upstream examples/SO100"
-fi
+# modality.json is GR00T-specific and absent from a stock LeRobot dataset. It maps this model's
+# configured camera keys onto the feature names the recording actually carries, and refuses if
+# the recording does not have them -- a mapping that disagrees with the data trains to
+# convergence and then drives the arm on another camera's frames.
+python "${MODEL_FILES}/write_modality.py" "${WORK}"
 
 # GR00T-specific checks: the modality mapping against this model's registered config. A
 # mismatch here is silent at training time and surfaces as an arm moving the wrong joint.
 cd "${GROOT_DIR}"
-DS="${WORK}" python "$(dirname "$0")/prepare_lib.py"
+DS="${WORK}" python "${MODEL_FILES}/check_dataset.py"
 
 # Flatten: the pipeline publishes $2 itself, so the tree has to sit at its root. `mv` rather
 # than a second copy — the work tree has no further use and these are large directories.

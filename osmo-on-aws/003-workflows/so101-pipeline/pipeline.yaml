@@ -17,8 +17,8 @@ version: 2
 # THE ARM MOVES ONLY WITH allow_motion=true.
 #
 # A model is a directory under models/, selected by templating the path its scripts are injected
-# from, so this spec never names one. Each directory provides twelve files; the helper slots may
-# be empty but must exist, or the submit fails at validate naming the missing path:
+# from, so this spec never names one. Each directory provides these eight files; a missing one
+# fails at validate naming the path:
 #
 #   install.sh           SOURCED by every stage. $1 stage (prepare|train|eval|serve)
 #   prepare.sh           $1 dataset-in   $2 dir-out
@@ -26,14 +26,12 @@ version: 2
 #   score.sh             $1 ckpt  $2 dataset  $3 dir-out  $4 traj-ids  $5 horizon  $6 steps
 #   serve.sh             $1 ckpt  $2 dataset  $3 port  $4 camera-names
 #   client_transport.sh  SOURCED by the robot task; exports TRANSPORT_MODULE
-#   common.py            injected into every stage        may be empty
-#   prepare_lib.py       injected into prepare            may be empty
-#   train_lib.py         injected into train              may be empty
-#   score_lib.py         injected into eval               may be empty
-#   serve_lib.py         injected into hil                may be empty
-#   transport.py         injected into both hil tasks     may be empty
+#   transport.py         injected into both hil tasks, so the two ends cannot disagree about the
+#                        wire. May be empty when the transport is an installable package.
+#   model.vars           read by ./submit.sh, not injected
 #
-# Each script receives every argument whether it uses it or not.
+# Each script receives every argument whether it uses it or not. Anything else a model needs --
+# its own Python, in any language -- install.sh writes, so nothing here is specific to a language.
 default-values:
   # --- composition -----------------------------------------------------------
   # Which stages to run. Must be exactly `true` or `false`; preflight rejects anything else
@@ -67,7 +65,7 @@ default-values:
 
   # --- data in, artefacts out ------------------------------------------------
   storage_url: s3://REPLACE-WITH-YOUR-DATASETS-BUCKET/model-agnostic
-  # Names the converted tree. Distinct per recording, NOT per run — see the prepare outputs.
+  # Names the converted tree. One per recording; re-running with the same name reuses it.
   dataset_name: REPLACE-WITH-YOUR-DATASET-NAME
   # source_dataset_url    set when run_prepare is true
   # prepared_dataset_url  set when a stage consumes a dataset and run_prepare is false
@@ -99,12 +97,11 @@ default-values:
   frames_per_trajectory: 400
 
   # --- the robot half --------------------------------------------------------
-  # NAME=SPEC per camera, ';'-separated. NAME must be the dataset's own image-feature suffix —
-  # a camera has three identities (how the client opens it, the dataset key, the model's
-  # internal key) and modality.json exists to map the last two, so the pipeline must not invent
-  # one. SPEC is either a selector resolved against sysfs on the machine at run time, or any
-  # value OpenCV accepts. PREFER A SELECTOR: /dev/videoN is assigned in enumeration order, so a
-  # replug renumbers it and the run then drives on the wrong camera's frames in silence.
+  # NAME=SPEC per camera, ';'-separated. NAME must be the dataset's own image-feature suffix,
+  # which modality.json maps to the model's internal key. SPEC is either a selector resolved
+  # against sysfs on the machine at run time, or any value OpenCV accepts. PREFER A SELECTOR:
+  # /dev/videoN is assigned in enumeration order, so a replug renumbers it and the run then
+  # drives on the wrong camera's frames in silence.
   # The rig is a property of the machine, so one camera or three is a configuration change;
   # joints stay fixed at six. Survey your own with:
   #   for d in /sys/class/video4linux/*; do echo "$d $(cat $d/name)"; readlink -f $d; done
@@ -115,7 +112,7 @@ default-values:
   allow_motion: false
   lang_instruction: REPLACE-WITH-YOUR-TASK-DESCRIPTION
 
-  # --- what the dataset must contain, asserted not assumed ------------------
+  # --- what the dataset must contain ----------------------------------------
   # Checked by the model-independent validator after conversion. A dataset that trains for
   # hours and then drives the wrong joint is the failure these two exist to prevent.
   expected_episodes: 0
@@ -209,7 +206,7 @@ default-values:
 
   # --- the client's own toolchain, pinned -----------------------------------
   # The calibrated joint space the policy learned is defined by the LeRobot version that
-  # recorded the data, so this is a correctness constraint rather than hygiene.
+  # recorded the data, so this pin has to match the one used for recording.
   client_image: public.ecr.aws/docker/library/python:3.12-slim
   lerobot_commit: 9021d2d24036e048b455d55919630e6e97394830
   torch_version: 2.10.0
@@ -279,6 +276,22 @@ workflow:
           set -euo pipefail
           fail=0
 
+          # The stage flags. Anything that is not exactly true or false is rejected below.
+          { read -r run_prepare; read -r run_train; read -r run_eval; read -r run_hil;
+            read -r allow_motion; } <<'OSMO_FLAGS'
+          {{ run_prepare | string | lower }}
+          {{ run_train | string | lower }}
+          {{ run_eval | string | lower }}
+          {{ run_hil | string | lower }}
+          {{ allow_motion | string | lower }}
+          OSMO_FLAGS
+
+          # Your task text, used verbatim. Quotes and $ are passed through unchanged.
+          lang_instruction="$(cat <<'OSMO_LANG_INSTRUCTION'
+          {{ lang_instruction }}
+          OSMO_LANG_INSTRUCTION
+          )"
+
           echo "=== resolved configuration ==="
           echo "  model            {{ model }}"
           echo "  dataset_name     {{ dataset_name }}"
@@ -289,33 +302,33 @@ workflow:
           echo "  traj_ids         {{ traj_ids }}"
           echo "  execution_horiz  {{ execution_horizon }}"
           echo "  frames_per_traj  {{ frames_per_trajectory }}"
-          echo "  run_prepare      {{ run_prepare | string | lower }}"
-          echo "  run_train        {{ run_train | string | lower }}"
-          echo "  run_eval         {{ run_eval | string | lower }}"
-          echo "  run_hil          {{ run_hil | string | lower }}"
+          echo "  run_prepare      ${run_prepare}"
+          echo "  run_train        ${run_train}"
+          echo "  run_eval         ${run_eval}"
+          echo "  run_hil          ${run_hil}"
           echo "  storage_url      {{ storage_url }}"
           echo "  source_dataset   {{ source_dataset_url }}"
           echo "  prepared_dataset {{ prepared_dataset_url }}"
           echo "  checkpoint_url   {{ checkpoint_url }}"
           echo "  cameras          {{ cameras }}"
           echo "  robot_port       {{ robot_port }}"
-          echo "  lang_instruction {{ lang_instruction }}"
+          echo "  lang_instruction ${lang_instruction}"
           echo "  runtime_image    {{ runtime_image }}"
           echo "  gpu_platform     {{ gpu_platform }}"
           echo "  robot_platform   {{ robot_platform }}"
           echo "  cpu_platform     {{ cpu_platform }}"
           echo "  policy_port      {{ policy_port }}"
           echo "  exec_timeout     {{ exec_timeout }}"
-          echo "  allow_motion     {{ allow_motion | string | lower }}"
+          echo "  allow_motion     ${allow_motion}"
           echo "=============================="
           echo "If a flag you passed is absent above, you mistyped its name: --set accepts"
           echo "unknown keys silently and nothing else will tell you."
 
           # Strict booleans. The Jinja guards below coerce anything unrecognised to false,
           # which would skip a stage without saying so.
-          for pair in "run_prepare={{ run_prepare | string | lower }}" "run_train={{ run_train | string | lower }}" \
-                      "run_eval={{ run_eval | string | lower }}" "run_hil={{ run_hil | string | lower }}" \
-                      "allow_motion={{ allow_motion | string | lower }}"; do
+          for pair in "run_prepare=${run_prepare}" "run_train=${run_train}" \
+                      "run_eval=${run_eval}" "run_hil=${run_hil}" \
+                      "allow_motion=${allow_motion}"; do
             k="${pair%%=*}"; v="${pair#*=}"
             case "$(echo "${v}" | tr '[:upper:]' '[:lower:]')" in
               true|false) ;;
@@ -338,53 +351,40 @@ workflow:
           }
 
           check_url storage_url "{{ storage_url }}" || fail=1
-          # dataset_name names the prepare stage's output prefix, so it is required only when
-          # that stage runs.
-{% if run_prepare | string | lower == 'true' %}
-          case "{{ dataset_name }}" in
-            *REPLACE-WITH-*) echo "ERROR: dataset_name is still a placeholder, and run_prepare is true" >&2; fail=1 ;;
-            */*) echo "ERROR: dataset_name is a name, not a path: '{{ dataset_name }}'" >&2; fail=1 ;;
-          esac
-{% endif %}
-          if [ "{{ run_prepare | string | lower }}" = "true" ]; then
+          # The prepare stage reads source_dataset_url and names its output after dataset_name, so
+          # both are required only when it runs.
+          if [ "${run_prepare}" = "true" ]; then
             check_url source_dataset_url "{{ source_dataset_url }}" || fail=1
+            case "{{ dataset_name }}" in
+              *REPLACE-WITH-*) echo "ERROR: dataset_name is still a placeholder, and run_prepare is true" >&2; fail=1 ;;
+              */*) echo "ERROR: dataset_name is a name, not a path: '{{ dataset_name }}'" >&2; fail=1 ;;
+            esac
           fi
-          if [ "{{ run_prepare | string | lower }}" != "true" ] \
-             && { [ "{{ run_train | string | lower }}" = "true" ] \
-               || [ "{{ run_eval | string | lower }}" = "true" ] \
-               || [ "{{ run_hil | string | lower }}" = "true" ]; }; then
+          if [ "${run_prepare}" != "true" ] \
+             && { [ "${run_train}" = "true" ] \
+               || [ "${run_eval}" = "true" ] \
+               || [ "${run_hil}" = "true" ]; }; then
             check_url prepared_dataset_url "{{ prepared_dataset_url }}" || fail=1
           fi
-          if [ "{{ run_train | string | lower }}" != "true" ] \
-             && { [ "{{ run_eval | string | lower }}" = "true" ] \
-               || [ "{{ run_hil | string | lower }}" = "true" ]; }; then
+          if [ "${run_train}" != "true" ] \
+             && { [ "${run_eval}" = "true" ] \
+               || [ "${run_hil}" = "true" ]; }; then
             check_url checkpoint_url "{{ checkpoint_url }}" || fail=1
           fi
 
-          # A no-op submission is a mistake, not a configuration.
-          if [ "{{ run_prepare | string | lower }}" != "true" ] \
-             && [ "{{ run_train | string | lower }}" != "true" ] \
-             && [ "{{ run_eval | string | lower }}" != "true" ] \
-             && [ "{{ run_hil | string | lower }}" != "true" ]; then
+          if [ "${run_prepare}" != "true" ] \
+             && [ "${run_train}" != "true" ] \
+             && [ "${run_eval}" != "true" ] \
+             && [ "${run_hil}" != "true" ]; then
             echo "ERROR: every stage is disabled; nothing would run" >&2; fail=1
           fi
 
-          if [ "{{ run_hil | string | lower }}" = "true" ]; then
-            case "{{ lang_instruction }}" in
+          if [ "${run_hil}" = "true" ]; then
+            case "${lang_instruction}" in
               *REPLACE-WITH-*) echo "ERROR: run_hil needs lang_instruction" >&2; fail=1 ;;
             esac
-            # Shell metacharacters would be spliced into the client's command line inside a
-            # privileged container holding the servo bus.
-            case "{{ lang_instruction }}" in
-              *'$'*|*'`'*|*'"'*|*'\\'*)
-                echo "ERROR: lang_instruction must not contain \$ \` \" or backslash" >&2; fail=1 ;;
-            esac
-            # Each pair, not just "contains an =". A name with a dot would make dataset-key
-            # suffix resolution ambiguous; a comma or equals breaks the encoding itself.
-            #
-            # The NAME is checked here, not the SPEC: a spec may be a selector, a device node, an
-            # OpenCV index, a video file or a URL. The client resolves it and refuses one matching
-            # zero devices or several, before torque.
+            # Names only: a dot, comma or equals in a name breaks the encoding downstream. The spec is
+            # not checked here -- the client resolves it, and refuses one matching no device or several.
             seen=""
             for pair in $(echo "{{ cameras }}" | tr ';' ' '); do
               case "${pair}" in
@@ -432,39 +432,21 @@ workflow:
       image: "{{ runtime_image }}"
       resource: cpu_data
 {% if hf_token_credential %}
-      # A gated model needs this and the pipeline cannot know which; the model names the
-      # credential in its model.vars. Keyed on the CAPABILITY, not on the model, so adding a
-      # model still adds no branch.
       credentials:
         {{ hf_token_credential }}:
           HF_TOKEN: token
 {% endif %}
       inputs:
       - url: "{{ source_dataset_url }}"
-      # Keep check-config LAST in every input list, so {{input:0}} keeps meaning the dataset.
-      # It is an input rather than just an earlier group because failure propagates only along
-      # input edges.
       - task: check-config
       outputs:
-      # Keyed by model and dataset NAME, not by run id, so the converted tree is a reusable
-      # cache. Re-running prepare over an existing prefix must therefore be safe, which is an
-      # obligation on the model's prepare.sh.
+      # Re-running prepare with the same model and dataset_name writes to this same prefix.
       - url: "{{ storage_url }}/dataset/{{ model }}/{{ dataset_name }}/"
       files:
       - localpath: models/{{ model }}/install.sh
         path: /tmp/install.sh
-      # A payload that declares itself a template is rendered by OSMO's server-side pass,
-      # whose scope is --set values ONLY — default-values are invisible to it. So a payload
-      # referencing a workflow variable makes that variable mandatory --set input forever.
-      # OSMO's own tokens are always in scope and are the safe case. See docs/CONTRACT.md.
       - localpath: models/{{ model }}/prepare.sh
         path: /tmp/prepare.sh
-      # Helper slots. Mandatory, may be empty; they land beside the script so a plain
-      # `import common` finds them.
-      - localpath: models/{{ model }}/common.py
-        path: /tmp/common.py
-      - localpath: models/{{ model }}/prepare_lib.py
-        path: /tmp/prepare_lib.py
       # Model-INDEPENDENT validation: episode count and state dimensionality against what the
       # submitter asserted. Runs on the prepared tree, so it checks what will be trained on.
       - localpath: shared/validate_common.py
@@ -499,9 +481,6 @@ workflow:
     - name: train-model
       lead: true
 {% if hf_token_credential %}
-      # A gated model needs this and the pipeline cannot know which; the model names the
-      # credential in its model.vars. Keyed on the CAPABILITY, not on the model, so adding a
-      # model still adds no branch.
       credentials:
         {{ hf_token_credential }}:
           HF_TOKEN: token
@@ -522,10 +501,6 @@ workflow:
         path: /tmp/install.sh
       - localpath: models/{{ model }}/train.sh
         path: /tmp/train.sh
-      - localpath: models/{{ model }}/common.py
-        path: /tmp/common.py
-      - localpath: models/{{ model }}/train_lib.py
-        path: /tmp/train_lib.py
       command: [bash, -c]
       args:
         - |
@@ -555,11 +530,7 @@ workflow:
                   found.append(dict(path=str(p.relative_to(root)), bytes=p.stat().st_size))
               return found
 
-          # One manifest per artifact: a run can publish a final export and several checkpoints,
-          # and each is downloaded on its own.
-          # Records what was published and how big. Whether a checkpoint is loadable is the
-          # model's question: each model's score.sh and serve.sh refuse an incomplete one by name
-          # before loading it.
+          # One per artifact, since each is downloaded on its own.
           for root, skip in [(out, checkpoints)] + [(c, []) for c in checkpoints]:
               name = str(root.relative_to(out)) if root != out else "(final export)"
               found = files_under(root, skip)
@@ -604,9 +575,6 @@ workflow:
     - name: score-checkpoint
       lead: true
 {% if hf_token_credential %}
-      # A gated model needs this and the pipeline cannot know which; the model names the
-      # credential in its model.vars. Keyed on the CAPABILITY, not on the model, so adding a
-      # model still adds no branch.
       credentials:
         {{ hf_token_credential }}:
           HF_TOKEN: token
@@ -632,12 +600,8 @@ workflow:
         path: /tmp/install.sh
       - localpath: models/{{ model }}/score.sh
         path: /tmp/score.sh
-      - localpath: models/{{ model }}/common.py
-        path: /tmp/common.py
-      - localpath: models/{{ model }}/score_lib.py
-        path: /tmp/score_lib.py
-      # Shared trajectory statistics, so a figure two models report under one name is one
-      # implementation. Lands beside score_lib.py, which imports it.
+      # Every model's scorer imports this, so two models' metrics are computed the same way
+      # and can be compared.
       - localpath: shared/trajectory_metrics.py
         path: /tmp/trajectory_metrics.py
       command: [bash, -c]
@@ -674,9 +638,6 @@ workflow:
       image: "{{ runtime_image }}"
       resource: gpu_infer
 {% if hf_token_credential %}
-      # A gated model needs this and the pipeline cannot know which; the model names the
-      # credential in its model.vars. Keyed on the CAPABILITY, not on the model, so adding a
-      # model still adds no branch.
       credentials:
         {{ hf_token_credential }}:
           HF_TOKEN: token
@@ -704,10 +665,6 @@ workflow:
         path: /tmp/install.sh
       - localpath: models/{{ model }}/serve.sh
         path: /tmp/serve.sh
-      - localpath: models/{{ model }}/common.py
-        path: /tmp/common.py
-      - localpath: models/{{ model }}/serve_lib.py
-        path: /tmp/serve_lib.py
       # The transport, injected into both ends of this group so the server and client cannot
       # disagree about the wire. May be empty: a model whose transport is an installable package
       # provides it from client_transport.sh instead.
@@ -743,13 +700,11 @@ workflow:
       outputs:
       - url: "{{ storage_url }}/hil/{{ model }}/{{workflow_id}}/"
       files:
-      # The robot client is shared and model-independent, and is not selected by the model
-      # variable.
+      # The robot client, shared by every model.
       - localpath: robot/eval_so101_bounded.py
         path: /tmp/eval_so101_bounded.py
-      # What the client drives, and the interface it drives through. The interface is the
-      # robot's, not this spec's; running against a simulator means a different implementation
-      # of it here, with nothing else in this file changing.
+      # The interface the client drives, and the implementation for a real arm. To drive a
+      # simulator, replace the second file; see README.md.
       - localpath: robot/environment.py
         path: /tmp/environment.py
       - localpath: robot/so101_environment.py
@@ -768,6 +723,12 @@ workflow:
       args:
         - |
           set -euo pipefail
+
+          # Your task text, passed to the client exactly as submitted.
+          lang_instruction="$(cat <<'OSMO_LANG_INSTRUCTION'
+          {{ lang_instruction }}
+          OSMO_LANG_INSTRUCTION
+          )"
 
           # CPU wheels: lerobot imports torch transitively so it cannot be skipped, and the CUDA
           # build is ~2.5 GB of no use on a machine with no GPU.
@@ -845,13 +806,13 @@ workflow:
             --control-hz {{ control_hz }} \
             --run-duration-s {{ run_duration_s }} \
             --interval-s {{ interval_s }} \
-            --lang-instruction "{{ lang_instruction }}" \
+            --lang-instruction "${lang_instruction}" \
             --output-dir {{output}} 2>&1 | tee {{output}}/hil_eval.log
 
           # lineage.json records what produced this result: the source URLs, the model, and the
           # stages that ran. It sits beside the client's results.json, which records what the
           # client resolved. Written after the client, so an aborted run still gets one.
-          python3 - {{output}}/lineage.json <<'PY'
+          python3 - {{output}}/lineage.json "${lang_instruction}" <<'PY'
           import json, pathlib, sys
           out = pathlib.Path(sys.argv[1])
           record = {
@@ -874,7 +835,7 @@ workflow:
               # A real JSON boolean. The raw value's case depends on how it was passed, and the
               # Python-cased spelling is a truthy string.
               "allow_motion": "{{ allow_motion }}".strip().lower() == "true",
-              "lang_instruction": "{{ lang_instruction }}",
+              "lang_instruction": sys.argv[2],
               "action_horizon": {{ action_horizon }},
               "control_hz": {{ control_hz }},
               "run_duration_s": {{ run_duration_s }},

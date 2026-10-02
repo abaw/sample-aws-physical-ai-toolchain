@@ -29,13 +29,12 @@ echo "[smolvla] train: steps=${STEPS} batch=${BATCH} save_freq=${SAVE_FREQ} seed
 
 WORK=/tmp/train_out
 rm -rf "${WORK}"
-HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # The pretrained checkpoint expects its image features named camera1..N; a recording names them
 # whatever it named them. Derived from the DATASET, which is the authority on what cameras exist —
 # never from a workflow variable, which could disagree with the recording. The rule lives in
 # common.py so serving applies the identical mapping; see the note there.
-RENAME_MAP="$(PYTHONPATH="${HERE}" python - "${DS}/meta/info.json" <<'PY'
+RENAME_MAP="$(PYTHONPATH="${MODEL_FILES}${PYTHONPATH:+:${PYTHONPATH}}" python - "${DS}/meta/info.json" <<'PY'
 import json, sys
 from common import image_keys_from_info, rename_map
 info = json.load(open(sys.argv[1]))

@@ -14,7 +14,6 @@ set -euo pipefail
 
 IN="${1:?prepare.sh needs an input dataset root}"
 OUT="${2:?prepare.sh needs an output directory}"
-HERE="$(cd "$(dirname "$0")" && pwd)"
 
 INFO="$(find "${IN}" -name info.json -path '*/meta/*' -print -quit)"
 if [ -z "${INFO}" ]; then
@@ -42,7 +41,7 @@ else
   # meta/episodes_stats.jsonl. LeRobot's converter validates the version string, believes it,
   # and dies on the missing file. The v2.0 -> v2.1 script that used to write it was removed in
   # v0.6.x, hence this backfill.
-  python "${HERE}/prepare_lib.py" "${DS}"
+  python "${MODEL_FILES}/write_episode_stats.py" "${DS}"
 
   # --root is the exact folder holding meta/, data/, videos/. The converter builds <root>_v30,
   # moves it over <root> and leaves the original at <root>_old, so afterwards ${DS} is the v3

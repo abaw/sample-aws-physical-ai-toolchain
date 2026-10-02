@@ -4,10 +4,8 @@
 # Score a SmolVLA checkpoint offline and write the pipeline's gate input.
 #   $1 checkpoint   $2 dataset root   $3 output dir   $4 traj-ids   $5 horizon   $6 max steps
 #
-# score_lib.py writes $3/metrics.json itself rather than printing numbers a caller has to scrape,
-# so the artifact cannot disagree with the log. The other shipped model has to scrape, because
-# its upstream evaluator only prints — which is exactly why the contract asks for the FILE and
-# leaves the method to the model.
+# MUST write $3/metrics.json: the pipeline gates on that file and never reads logs. Here
+# score_offline.py writes it directly.
 set -euo pipefail
 
 CKPT_IN="${1:?score.sh needs a checkpoint}"
@@ -16,14 +14,13 @@ OUT="${3:?score.sh needs an output directory}"
 TRAJ_IDS="${4:?score.sh needs trajectory ids}"
 HORIZON="${5:?score.sh needs an execution horizon}"
 FRAMES="${6:?score.sh needs a per-trajectory frame cap}"
-HERE="$(cd "$(dirname "$0")" && pwd)"
 
 CKPT="$(smolvla_resolve_checkpoint "${CKPT_IN}")"
 echo "[smolvla] score: ${CKPT} trajs='${TRAJ_IDS}' horizon=${HORIZON} frames_per_trajectory=${FRAMES}"
 mkdir -p "${OUT}"
 
 set +e
-python -u "${HERE}/score_lib.py" \
+python -u "${MODEL_FILES}/score_offline.py" \
   --checkpoint "${CKPT}" \
   --dataset-root "${DS}" \
   --repo-id "${REPO_ID:-local/so101-smolvla}" \

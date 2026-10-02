@@ -5,8 +5,7 @@
 #   $1 checkpoint   $2 dataset root   $3 output dir   $4 traj-ids   $5 horizon   $6 max steps
 #
 # MUST write $3/metrics.json: the pipeline gates on that file and never reads logs. GR00T's own
-# evaluator only PRINTS its numbers, so the scraping lives here — the pipeline must never learn
-# another project's log format.
+# evaluator only prints its numbers, so this script scrapes them out of its log.
 set -euo pipefail
 
 CKPT_IN="${1:?score.sh needs a checkpoint}"
@@ -15,7 +14,6 @@ OUT="${3:?score.sh needs an output directory}"
 TRAJ_IDS="${4:?score.sh needs trajectory ids}"
 HORIZON="${5:?score.sh needs an execution horizon}"
 FRAMES="${6:?score.sh needs a per-trajectory frame cap}"
-HERE="$(cd "$(dirname "$0")" && pwd)"
 CKPT="$(gr00t_resolve_checkpoint "${CKPT_IN}")"
 
 echo "[gr00t-n17] score: trajs='${TRAJ_IDS}' horizon=${HORIZON} frames_per_trajectory=${FRAMES}"
@@ -47,7 +45,7 @@ python gr00t/eval/open_loop_eval.py \
 # Smoothness, which the error metrics above cannot see: a zero-mean oscillation on a broadly
 # correct trajectory scores well on MSE and MAE, and on a real arm it is what overheats a joint.
 # Allowed to fail — a smoothness crash must not destroy a valid error measurement.
-python -u "${HERE}/score_lib.py" "${DS}" "${CKPT}" \
+python -u "${MODEL_FILES}/measure_smoothness.py" "${DS}" "${CKPT}" \
   "${SMOOTHNESS_TRAJ_ID:-0}" "${SMOOTHNESS_STEPS:-160}" "${DENOISING_STEPS:-4}" \
   2>&1 | tee "${OUT}/smoothness.log" || echo "SMOOTHNESS_FAILED"
 grep RESULTS_JSON "${OUT}/smoothness.log" | sed 's/^RESULTS_JSON //' > "${OUT}/smoothness.json" || true
@@ -131,10 +129,8 @@ result = dict(
     plot_count=len(list((out / "plots").glob("*.jpeg"))),
     smoothness=smoothness,
     complete=not missing and avg("MSE") is not None,
-    # The contract's own spelling, so one gate reads every model's metrics.json.
-    # Duplicated rather than renamed: average_mse and the nested smoothness object
-    # are what this pipeline's own README and past runs report, and silently
-    # renaming them would break every reader that already exists.
+    # The contract's spelling, duplicated rather than renamed: average_mse and the
+    # nested smoothness object are what past runs and the README already report.
     mse=avg("MSE"),
     mae=avg("MAE"),
     worst_reversals_predicted=worst_reversals_predicted,
@@ -160,8 +156,8 @@ if smoothness:
 (out / "metrics.txt").write_text("\n".join(lines) + "\n")
 print("\n".join(lines))
 
-# Loud, and deliberately not a failure: a jittery policy is still drivable, but only
-# with stage 04's command deadband. Silence here is what let it reach hardware.
+# Warns, never fails: a jittery policy is still drivable, but set command_deadband_deg
+# before driving it and watch servo temperature.
 if smoothness and smoothness["worst_reversals"] > float(sys.argv[5]):
     print(
         "WARNING: this checkpoint's action chunks reverse direction on %.0f%% of "

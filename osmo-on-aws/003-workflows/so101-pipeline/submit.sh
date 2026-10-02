@@ -105,6 +105,17 @@ if [ -n "${MODEL}" ]; then
   [ -d "${HERE}/models/${MODEL}" ] || die "no model '${MODEL}'. Available: $(cd "${HERE}/models" && ls -d */ | tr -d / | paste -sd, -)"
   put "model=${MODEL}"
   [ -f "${HERE}/models/${MODEL}/model.vars" ] && load_vars "${HERE}/models/${MODEL}/model.vars"
+
+  # OSMO renders Jinja over every injected file, so a `{{` or `{%` anywhere in a model's scripts
+  # is consumed before the shell or Python sees it. install.sh carries this model's own code in
+  # heredocs, where an f-string like f"{{x}}" is easy to write and the failure is a 400 quoting a
+  # line number in an assembled template nobody can read. None of these files needs Jinja.
+  JINJA_HITS="$(grep -nE '\{\{|\{%|\{#' "${HERE}/models/${MODEL}"/*.sh "${HERE}/models/${MODEL}"/*.py 2>/dev/null || true)"
+  if [ -n "${JINJA_HITS}" ]; then
+    echo "ERROR: Jinja delimiters in models/${MODEL}; OSMO would render them away:" >&2
+    echo "${JINJA_HITS}" >&2
+    exit 2
+  fi
 fi
 
 # The command line goes on LAST, so an explicit value always beats a file's. Collected during
