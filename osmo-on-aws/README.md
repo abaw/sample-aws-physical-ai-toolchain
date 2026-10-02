@@ -264,31 +264,29 @@ For more details on profile configuration, see the [OSMO Setup Profile documenta
 | `cosmos_transfer.yaml` | L40S | Full Isaac Sim → Cosmos Transfer2.5 SDG pipeline |
 | `cosmos_transfer_augmentation.yaml` | L40S | Prompt-driven video augmentation with Cosmos Transfer2.5 |
 | `pick_and_place_training.yaml` | Multi-GPU | Reference skeleton for a full pick-and-place pipeline |
-| [`so101-vla/`](003-workflows/so101-vla/README.md) | 1× L40S | **Multi-stage example** — fine-tune a VLA model on SO-101 recordings, evaluate it offline, then close the loop on a real arm |
-| [`so101-pi0fast/`](003-workflows/so101-pi0fast/README.md) | 1× L40S | **A second VLA on the same arm** — pi0-FAST through LeRobot, as a check that these stages are not shaped around one model |
+| [`so101-pipeline/`](003-workflows/so101-pipeline/README.md) | 1× L40S | **Multi-stage example** — prepare a dataset, fine-tune a VLA, score it offline, then close the loop on a real arm. One spec, four switchable stages, three interchangeable models |
 
-The single-file workflows above are each self-contained. `so101-vla/` is a four-stage pipeline —
-prepare a dataset, fine-tune GR00T N1.7, evaluate the checkpoint offline, then drive a physical SO-101
-arm with it — and has its own [README](003-workflows/so101-vla/README.md) covering prerequisites,
-submit order, measured resource requirements, and how to read each result. It needs a Hugging Face
-token credential.
+The single-file workflows above are each self-contained. `so101-pipeline/` is the multi-stage one:
+prepare → train → eval → hil, each switched on or off by a flag, with the model selected by
+directory name so the spec never names one. Three models ship with it — GR00T N1.7, pi0-FAST and
+SmolVLA — which is what demonstrates the stages are not shaped around a single architecture, since
+the three need mutually unreadable dataset formats and different training entry points. It has its
+own [README](003-workflows/so101-pipeline/README.md) covering prerequisites, how to add a model, the
+robot half, and how to read a result, plus
+[`docs/MEASUREMENTS.md`](003-workflows/so101-pipeline/docs/MEASUREMENTS.md) for measured sizing and
+what has and has not been validated on hardware. It needs a Hugging Face token credential.
 
-`so101-pi0fast/` runs a **second** model — pi0-FAST — on the same arm and the same recordings, as a
-check that these stages are not shaped around one model's architecture. It is deliberately a sibling
-rather than an option inside `so101-vla/`: the two need mutually unreadable dataset formats and
-different training entry points, and keeping them separate is what makes the differences visible.
+Every stage is validated on real hardware for every model, including powered closed-loop runs. No
+shipped policy performs the task well, which its docs say plainly — the example demonstrates that the
+pipeline is model-agnostic, not that any particular policy works. Where adding a model actually costs
+effort is measured too: mostly the dataset stage, then serving, and almost not at all the robot
+client, which every model shares unchanged.
 
-All four of its stages are validated on real hardware, including a powered closed-loop run. Its
-policy does **not** perform the task well, which that README says plainly — the example demonstrates
-that the pipeline is model-agnostic, not that any particular policy works. What it measured is where
-the cost of a second model actually falls: mostly on the dataset stage, then serving, and almost not
-at all on the robot client, which the two pipelines now share.
-
-Its first three stages need no robot and are a complete cloud pipeline on their own. **Stage 04 is the
-only workflow in this repo that physically actuates hardware**: it gang-schedules a policy server on a
-GPU node beside a robot client on an [EKS Hybrid Node](docs/hybrid-nodes-so101.md) with the arm
-attached, and it requires the opt-in hybrid-node infrastructure. Read that example's safety section
-before submitting it.
+The first three stages need no robot and are a complete cloud pipeline on their own. **The `hil` stage
+is the only thing in this repo that physically actuates hardware**: it gang-schedules a policy server
+on a GPU node beside a robot client on an [EKS Hybrid Node](docs/hybrid-nodes-so101.md) with the arm
+attached, it requires the opt-in hybrid-node infrastructure, and it moves nothing unless
+`allow_motion=true`. Read that example's safety section before submitting it.
 
 ### Getting Started (Recommended Order)
 
@@ -342,10 +340,10 @@ osmo-on-aws/
 │   ├── manifests/         # Kubernetes manifests
 │   └── cleanup/           # Uninstall scripts
 ├── 003-workflows/         # Example workflows
-│   ├── so101-vla/         # Multi-stage SO-101 VLA example, cloud through real arm (see its README)
-│   │   └── files/         # Scripts injected into tasks at submit time
-│   └── so101-pi0fast/     # The same arm with a second model, pi0-FAST (see its README)
-│       └── files/
+│   └── so101-pipeline/    # Multi-stage SO-101 VLA example, cloud through real arm (see its README)
+│       ├── models/        # One directory per model; the spec selects by path
+│       ├── robot/         # The arm's client and the environment interface it drives
+│       └── shared/        # Model-independent helpers injected into tasks
 └── docs/                  # Documentation
 ```
 

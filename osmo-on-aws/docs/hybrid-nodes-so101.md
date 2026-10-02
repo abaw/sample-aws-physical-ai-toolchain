@@ -283,13 +283,12 @@ missing permission.
 
 ## 10. What consumes the node once it is attached
 
-Two workflows in this repo schedule a task here, both as the robot half of a
-gang-scheduled pair whose other half holds a cloud GPU:
-[`so101-vla/04_hil_eval.yaml`](../003-workflows/so101-vla/README.md) and
-[`so101-pi0fast/04_hil_eval.yaml`](../003-workflows/so101-pi0fast/README.md). They share one
-robot client and differ only in the policy server they talk to, so the device paths
-identified in step 9 are set the same way in both — as workflow variables, not baked
-into a script.
+One workflow in this repo schedules a task here, as the robot half of a
+gang-scheduled pair whose other half holds a cloud GPU: the `hil` stage of
+[`so101-pipeline/`](../003-workflows/so101-pipeline/README.md). Whichever model is
+selected, the robot client is the same and only the policy server it talks to
+differs, so the device paths identified in step 9 are set as workflow variables
+rather than baked into a script.
 
 Both refuse to move the arm unless told to explicitly. Rehearse with `no_motion=true`
 first; it exercises scheduling, the tunnel, device access and the full control loop
