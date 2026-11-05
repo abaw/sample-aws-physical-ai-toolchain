@@ -38,7 +38,7 @@ docker run --shm-size=60g --gpus all --rm -it \
   -e NVIDIA_DRIVER_CAPABILITIES=all \
   -e ACCEPT_EULA=Y \
   -w /workspace/isaaclab \
-  804152302157.dkr.ecr.us-east-2.amazonaws.com/physical-ai/isaac-lab:latest \
+  $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/physical-ai/isaac-lab:latest \
   bash -c "./isaaclab.sh -p /workspace/isaaclab/scripts/reinforcement_learning/rsl_rl/train.py \
     --task Isaac-Velocity-Flat-Anymal-D-v0 \
     --num_envs 64 --max_iterations 50 --headless"
@@ -70,7 +70,7 @@ docker run --shm-size=60g --gpus all --rm -it \
   -e ACCEPT_EULA=Y \
   -v ~/checkpoints:/workspace/checkpoints \
   -w /workspace/isaaclab \
-  804152302157.dkr.ecr.us-east-2.amazonaws.com/physical-ai/isaac-lab:latest \
+  $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/physical-ai/isaac-lab:latest \
   bash -c "./isaaclab.sh -p /workspace/isaaclab/scripts/reinforcement_learning/rsl_rl/play.py \
     --task Isaac-Velocity-Flat-Anymal-D-v0 \
     --checkpoint /workspace/checkpoints/logs/rsl_rl/anymal_d_flat/<TIMESTAMP>/model_99.pt \
@@ -89,7 +89,7 @@ docker run --shm-size=60g --gpus all --rm -it \
   -e ACCEPT_EULA=Y \
   -v ~/checkpoints:/workspace/checkpoints \
   -w /workspace/isaaclab \
-  804152302157.dkr.ecr.us-east-2.amazonaws.com/physical-ai/isaac-lab:latest \
+  $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/physical-ai/isaac-lab:latest \
   bash
 ```
 
