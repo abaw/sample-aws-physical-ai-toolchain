@@ -110,6 +110,11 @@ resource "aws_instance" "workstation" {
     volume_size = var.volume_size
     volume_type = "gp3"
     encrypted   = true
+
+    # default_tags does not reach the root volume.
+    tags = {
+      "auto-delete" = "no"
+    }
   }
 
   metadata_options {
