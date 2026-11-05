@@ -11,4 +11,11 @@ terraform {
 
 provider "aws" {
   region = var.aws_region
+
+  # Keep Amazon SpringClean from deleting these resources after 7 days.
+  default_tags {
+    tags = {
+      "auto-delete" = "no"
+    }
+  }
 }
