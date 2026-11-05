@@ -39,6 +39,7 @@ export class FoundationStack extends cdk.Stack {
   public readonly inferenceRepo: ecr.Repository;
   public readonly cosmosRepo: ecr.Repository;
   public readonly cosmos3Repo: ecr.Repository;
+  public readonly mujocoRepo: ecr.Repository;
   public readonly sagemakerRole: iam.Role;
 
   constructor(scope: Construct, id: string, props: FoundationStackProps) {
@@ -153,6 +154,15 @@ export class FoundationStack extends cdk.Stack {
       repositoryName: `${projectName}/cosmos3`,
       imageScanOnPush: true,
       lifecycleRules: [{ maxImageCount: 3 }],
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      emptyOnDelete: true,
+    });
+
+    // MuJoCo (MJX + Playground) RL training container — built from a public CUDA base
+    this.mujocoRepo = new ecr.Repository(this, 'MujocoRepo', {
+      repositoryName: `${projectName}/mujoco`,
+      imageScanOnPush: true,
+      lifecycleRules: [{ maxImageCount: 5 }],
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       emptyOnDelete: true,
     });
@@ -423,6 +433,12 @@ export class FoundationStack extends cdk.Stack {
       value: this.cosmos3Repo.repositoryUri,
       description: 'ECR URI for the Cosmos 3 (cosmos-framework) container (built from source)',
       exportName: `${projectName}-${environment}-cosmos3-ecr`,
+    });
+
+    new cdk.CfnOutput(this, 'MujocoRepoUri', {
+      value: this.mujocoRepo.repositoryUri,
+      description: 'ECR URI for the MuJoCo (MJX + Playground) training container',
+      exportName: `${projectName}-${environment}-mujoco-ecr`,
     });
 
     new cdk.CfnOutput(this, 'CosmosInstanceProfileName', {

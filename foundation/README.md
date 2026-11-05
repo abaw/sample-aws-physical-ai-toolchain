@@ -16,6 +16,7 @@ Shared AWS resources that all other toolchain components depend on. Deploy this 
 | ECR Repo | `physical-ai/isaac-lab` | Isaac Lab RL training container |
 | ECR Repo | `physical-ai/cosmos-transfer` | Cosmos Transfer 2.5 container |
 | ECR Repo | `physical-ai/cosmos3` | Cosmos 3 generation container |
+| ECR Repo | `physical-ai/mujoco` | MuJoCo (MJX + Playground) RL training container |
 | IAM Role | `physical-ai-<env>-sagemaker-role` | SageMaker execution role |
 | IAM Role | `physical-ai-<env>-cosmos-role` | Cosmos EC2 instance role |
 | VPC | `physical-ai-<env>-vpc` | Shared networking (2 public + 3 private subnets) |
@@ -92,6 +93,7 @@ All resources are published as SSM Parameters under `/physical-ai/`:
 | `/physical-ai/ecr/isaac-lab` | Isaac Lab ECR URI |
 | `/physical-ai/ecr/cosmos-transfer` | Cosmos Transfer ECR URI |
 | `/physical-ai/ecr/cosmos3` | Cosmos 3 ECR URI |
+| `/physical-ai/ecr/mujoco` | MuJoCo ECR URI |
 | `/physical-ai/vpc-id` | Shared VPC ID |
 | `/physical-ai/private-subnet-ids` | Private subnet IDs (comma-separated) |
 

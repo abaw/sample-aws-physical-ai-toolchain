@@ -310,6 +310,12 @@ resource "aws_ecr_repository" "cosmos3" {
   image_scanning_configuration { scan_on_push = true }
 }
 
+resource "aws_ecr_repository" "mujoco" {
+  name                 = "${var.project_name}/mujoco"
+  image_tag_mutability = "MUTABLE"
+  image_scanning_configuration { scan_on_push = true }
+}
+
 # ECR URIs in SSM (so component CodeBuild projects can discover them)
 resource "aws_ssm_parameter" "gr00t_training_ecr" {
   name  = "/${var.project_name}/ecr/gr00t-training"
@@ -339,4 +345,10 @@ resource "aws_ssm_parameter" "cosmos3_ecr" {
   name  = "/${var.project_name}/ecr/cosmos3"
   type  = "String"
   value = aws_ecr_repository.cosmos3.repository_url
+}
+
+resource "aws_ssm_parameter" "mujoco_ecr" {
+  name  = "/${var.project_name}/ecr/mujoco"
+  type  = "String"
+  value = aws_ecr_repository.mujoco.repository_url
 }
