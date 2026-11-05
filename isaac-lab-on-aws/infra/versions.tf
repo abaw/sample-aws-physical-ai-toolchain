@@ -11,4 +11,11 @@ terraform {
 
 provider "aws" {
   region = var.aws_region
+
+  # Amazon SpringClean deletes untagged resources older than 7 days.
+  default_tags {
+    tags = {
+      "auto-delete" = "no"
+    }
+  }
 }
