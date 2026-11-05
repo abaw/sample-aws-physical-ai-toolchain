@@ -1,0 +1,29 @@
+version: 0.2
+
+# Builds the MuJoCo (MJX + Playground) training container in CodeBuild and pushes it to ECR.
+# Base image is a public CUDA image and the Python packages come from PyPI,
+# so no NGC key is needed.
+#
+# Env vars provided by the ContainerBuild construct:
+#   ECR_REPO_URI        - full ECR repo URI (…/physical-ai/mujoco)
+#   AWS_DEFAULT_REGION  - build region
+
+phases:
+  pre_build:
+    commands:
+      - echo "Build started on $(date)"
+      - REGISTRY=$(echo "$ECR_REPO_URI" | cut -d/ -f1)
+      - echo "Logging in to ECR registry $REGISTRY..."
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+  build:
+    commands:
+      - echo "Building mujoco-training image..."
+      # Dockerfile COPYs paths relative to the repo root (training/),
+      # so the build context is the repo root and we point -f at the Dockerfile.
+      - docker build --platform linux/amd64 -t mujoco-training -f containers/mujoco/Dockerfile .
+      - docker tag mujoco-training:latest "$ECR_REPO_URI:latest"
+  post_build:
+    commands:
+      - echo "Pushing to ECR..."
+      - docker push "$ECR_REPO_URI:latest"
+      - 'echo "Done. Image: $ECR_REPO_URI:latest"'
