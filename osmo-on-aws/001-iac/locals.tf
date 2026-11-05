@@ -19,6 +19,8 @@ locals {
     ClusterName    = var.cluster_name
     ProjectName    = "OSMO on AWS"
     CodeRepository = "https://github.com/your-org/osmo-on-aws"
+    # Exempts the estate from SpringClean, which deletes resources lacking this tag after 7 days
+    "auto-delete" = "no"
   }
 
   # Availability zones
