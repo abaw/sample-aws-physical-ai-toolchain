@@ -91,6 +91,13 @@ export class FoundationStack extends cdk.Stack {
     // ECR REPOSITORIES
     // =========================================================================
 
+    // GR00T repos are spelled `groot-*` here but `gr00t-*` in the Terraform
+    // foundation (foundation/infra/main.tf, its /<project>/ecr/gr00t-* SSM
+    // params, and isaac-gr00t-on-aws/infra). The two paths do not share these
+    // repos: deploy one path, not a mix. The names stay as they are because
+    // renaming a deployed repo replaces it, and DESTROY + emptyOnDelete deletes
+    // its images.
+
     // GR00T fine-tuning container (Path A)
     this.grootTrainingRepo = new ecr.Repository(this, 'GrootTrainingRepo', {
       repositoryName: `${projectName}/groot-training`,

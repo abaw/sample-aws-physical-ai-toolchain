@@ -4,11 +4,14 @@ version: 0.2
 # Base image is an AWS PyTorch Deep Learning Container (ECR account 763104351884);
 # CodeBuild authenticates to that account in pre_build. No NGC credentials required.
 #
-# Env vars provided by the ContainerBuild construct:
-#   ECR_REPO_URI        - full ECR repo URI (…/physical-ai/gr00t-training)
+# Env vars provided by the CodeBuild project (CDK ContainerBuild construct or
+# isaac-gr00t-on-aws/infra Terraform):
+#   ECR_REPO_URI        - full ECR repo URI (…/physical-ai/groot-training under
+#                         CDK, …/physical-ai/gr00t-training under Terraform)
 #   AWS_DEFAULT_REGION  - build region
-# NOTE: the ECR repo name itself ("groot-training") is unchanged — only the
+# NOTE: the CDK ECR repo name ("groot-training") is unchanged — only the
 # containers/gr00t-training/ source folder was renamed for spelling consistency.
+# The Terraform foundation spells the repo "gr00t-training" (foundation/README.md).
 
 phases:
   pre_build:

@@ -4,8 +4,10 @@ version: 0.2
 # Base image is an AWS PyTorch Deep Learning Container (ECR account 763104351884);
 # CodeBuild authenticates to that account in pre_build.
 #
-# Env vars provided by the ContainerBuild construct:
-#   ECR_REPO_URI        - full ECR repo URI (…/physical-ai/gr00t-inference)
+# Env vars provided by the CodeBuild project (CDK ContainerBuild construct or
+# isaac-gr00t-on-aws/infra Terraform):
+#   ECR_REPO_URI        - full ECR repo URI (…/physical-ai/groot-inference under
+#                         CDK, …/physical-ai/gr00t-inference under Terraform)
 #   AWS_DEFAULT_REGION  - build region
 
 phases:

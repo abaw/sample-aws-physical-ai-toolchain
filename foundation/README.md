@@ -11,8 +11,8 @@ Shared AWS resources that all other toolchain components depend on. Deploy this 
 | S3 Bucket | `physical-ai-<env>-datasets-<account>` | Training datasets (LeRobot format, USD) |
 | S3 Bucket | `physical-ai-<env>-models-<account>` | Trained models (ONNX, TensorRT) |
 | S3 Bucket | `physical-ai-<env>-checkpoints-<account>` | Training checkpoints (14-day auto-expiry) |
-| ECR Repo | `physical-ai/gr00t-training` | GR00T fine-tuning container |
-| ECR Repo | `physical-ai/gr00t-inference` | GR00T inference container |
+| ECR Repo | `physical-ai/gr00t-training` | GR00T fine-tuning container (CDK: `groot-training`) |
+| ECR Repo | `physical-ai/gr00t-inference` | GR00T inference container (CDK: `groot-inference`) |
 | ECR Repo | `physical-ai/isaac-lab` | Isaac Lab RL training container |
 | ECR Repo | `physical-ai/cosmos-transfer` | Cosmos Transfer 2.5 container |
 | ECR Repo | `physical-ai/cosmos3` | Cosmos 3 generation container |
@@ -66,7 +66,14 @@ npm install
 npx cdk deploy PhysicalAi-dev-Foundation --context mode=simple
 ```
 
-The CDK Foundation stack creates the same resources as Terraform plus triggers CodeBuild projects that automatically build all container images.
+The CDK Foundation stack creates equivalent resources to Terraform plus triggers CodeBuild projects that automatically build all container images.
+
+The CDK stack is not a drop-in for the Terraform one, so pick one path and stay on it:
+
+- It names the GR00T repos `physical-ai/groot-training` and `physical-ai/groot-inference` (`groot`, not `gr00t`).
+- It publishes no `/physical-ai/*` SSM parameters. It exports CloudFormation outputs instead (for example `physical-ai-dev-groot-training-ecr`).
+
+A Terraform component such as `isaac-gr00t-on-aws/infra` reads `/physical-ai/ecr/gr00t-training`, so it will not find a CDK-built repo. The names stay as they are because renaming a deployed ECR repo replaces it and deletes its images.
 
 ### CDK Modes
 
@@ -79,7 +86,7 @@ The CDK Foundation stack creates the same resources as Terraform plus triggers C
 
 ## How Other Components Find These Resources
 
-All resources are published as SSM Parameters under `/physical-ai/`:
+The Terraform foundation publishes all resources as SSM Parameters under `/physical-ai/` (the CDK stack does not; see above):
 
 | Parameter | Value |
 |-----------|-------|
