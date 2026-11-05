@@ -306,6 +306,18 @@ export class FoundationStack extends cdk.Stack {
       requiresNgcLogin: true,
     });
 
+    // MuJoCo (MJX + Playground) RL container — public CUDA base + PyPI, so no
+    // NGC login and a few-GB image that fits the LARGE builder.
+    new ContainerBuild(this, 'MujocoBuild', {
+      projectName,
+      imageName: 'mujoco',
+      repository: this.mujocoRepo,
+      buildSpecPath: 'containers/mujoco/buildspec.yml',
+      sourceAsset,
+      computeType: codebuild.ComputeType.LARGE,
+      timeout: cdk.Duration.minutes(60),
+    });
+
     // Inference container (edge) — TensorRT + ROS2. Two targets, both built in
     // the cloud so nothing (not even the Jetson/aarch64 image) builds locally:
     //   - x86 target  → pushed as :latest  (GPU PC / workstation testing)
