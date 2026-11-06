@@ -63,7 +63,7 @@ terraform apply -var="aws_region=us-east-2"
 
 | Item | Cost | Notes |
 |------|------|-------|
-| g6e.4xlarge (running) | ~$1.86/hr | Stop when not in use |
+| g6e.4xlarge (running) | ~$3.00/hr | Stop when not in use |
 | EBS 512 GB | ~$40/month | Persists when instance is stopped |
 
 **Always stop the instance when done** — it bills per second while running.

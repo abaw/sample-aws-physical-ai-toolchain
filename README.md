@@ -112,7 +112,7 @@ The example uses a **UR3 arm** (a popular collaborative robot in the industry) w
 | GR00T training (full) | ~$79 | ml.g5.12xlarge for 11 hrs |
 | Cosmos 3 Predict | ~$37/hr | p5.48xlarge (Capacity Block) |
 | Cosmos Transfer 2.5 | ~$8/hr | g6e.12xlarge (Spot) |
-| Isaac Sim workstation | ~$1.86/hr | g6e.4xlarge (stop when idle) |
+| Isaac Sim workstation | ~$3.00/hr | g6e.4xlarge (stop when idle) |
 | Isaac Lab RL training | ~$10-30 | ml.g5.xlarge for 2-4 hrs |
 | OSMO (full deployment) | ~$5/hr | EKS + RDS + ElastiCache |
 

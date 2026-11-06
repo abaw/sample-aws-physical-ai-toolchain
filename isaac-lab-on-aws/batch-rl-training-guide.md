@@ -297,7 +297,7 @@ aws batch update-compute-environment \
   --region us-east-2
 ```
 
-This keeps a g6e.4xlarge running (~$1.86/hr). Jobs start immediately instead of waiting 3-5 min for provisioning.
+This keeps a g6e.4xlarge running (~$3.00/hr). Jobs start immediately instead of waiting 3-5 min for provisioning.
 
 ### Scale back to zero when done
 
