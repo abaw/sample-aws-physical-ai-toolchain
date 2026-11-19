@@ -1,0 +1,12 @@
+# Pre-commit hooks for the repository root. osmo-on-aws/ keeps its own config for its Terraform.
+# Install: pip install pre-commit && pre-commit install
+
+repos:
+  # Secret scan over the staged files: a grep, no scanner binary (scripts/secret-scan-staged.sh).
+  - repo: local
+    hooks:
+      - id: secret-scan
+        name: secret scan (staged files)
+        entry: sh scripts/secret-scan-staged.sh
+        language: system
+        pass_filenames: false

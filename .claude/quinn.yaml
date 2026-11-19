@@ -72,8 +72,9 @@ ci:
     fast:
       # ADR 006 release.test_command: the one pinned command CI and the release check both run.
       # Byte-compile the pai CLI, type-check the CDK app, run the MuJoCo Batch launcher dry-run
-      # tests through their __main__ (stdlib only: the box python has no pytest).
-      command: "python3 -m compileall -q pai && cdk/node_modules/.bin/tsc -p cdk --noEmit && python3 training/scripts/test_launch_mujoco_batch.py"
+      # tests and the staged secret-scan hook tests through their __main__ (stdlib only: the box
+      # python has no pytest).
+      command: "python3 -m compileall -q pai && cdk/node_modules/.bin/tsc -p cdk --noEmit && python3 training/scripts/test_launch_mujoco_batch.py && python3 scripts/test_secret_scan_hook.py"
       trigger: pr
     integration:
       # Real dependencies as containers on the runner (Postgres, MinIO, Redis, the repo's own
