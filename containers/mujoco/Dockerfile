@@ -12,8 +12,10 @@
 
 # Base: public CUDA base (driver libs come from the host via the NVIDIA
 # container toolkit; jax[cuda12] brings its own CUDA/cuDNN wheels).
-# Ubuntu 24.04 ships Python 3.12.
-FROM nvidia/cuda:12.9.2-base-ubuntu24.04
+# Ubuntu 24.04 ships Python 3.12. Pulled from NGC rather than Docker Hub:
+# same image (same digest), and NGC allows anonymous pulls that avoid Docker
+# Hub's anonymous rate limit, which CodeBuild's shared egress IPs can exhaust.
+FROM nvcr.io/nvidia/cuda:12.9.2-base-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 

@@ -33,7 +33,7 @@ Run [MuJoCo](https://mujoco.org/) on AWS for GPU-parallel robot RL. MuJoCo is th
 
 | | MuJoCo | Isaac Lab / Isaac Sim |
 |-|--------|-----------------------|
-| Container base | Public CUDA image, packages from PyPI | NGC image (`nvcr.io/...`) |
+| Container base | Public NGC CUDA image (anonymous pull), packages from PyPI | NGC image (`nvcr.io/...`) |
 | NGC API key | Not needed | Needed to build the image |
 | Image size | A few GB | ~16 GB |
 | Batch job | Single node, 1 GPU, job definition created by Terraform | Multi-node job definition (CDK), or registered by hand (Terraform) |
