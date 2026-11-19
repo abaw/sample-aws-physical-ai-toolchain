@@ -355,7 +355,7 @@ The Capacity Block itself expires automatically at its end time — no separate 
 | Container pull (`vllm/vllm-omni:cosmos3`) | ✅ Validated | ~30 GB, completed in setup script |
 | Model weight download + server ready | ✅ Validated | ~126 GB, ~24 min total, `/v1/models` confirmed ready |
 | V2V generation from real UR3 data | ✅ Validated | Input: 862 KB episode clip → Output: 6.0 MB, 189 frames, HTTP 200 |
-| S3 upload of original + generated | ✅ Validated | `s3://physical-ai-dev-datasets-804152302157/cosmos-samples/{original,augmented}_episode_000000.mp4` |
+| S3 upload of original + generated | ✅ Validated | `s3://physical-ai-dev-datasets-<ACCOUNT_ID>/cosmos-samples/{original,augmented}_episode_000000.mp4` |
 
 ---
 
