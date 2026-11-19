@@ -21,9 +21,13 @@ phases:
       # Dockerfile COPYs paths relative to the repo root (training/),
       # so the build context is the repo root and we point -f at the Dockerfile.
       - docker build --platform linux/amd64 -t mujoco-training -f containers/mujoco/Dockerfile .
+      # CPU smoke test inside the built image before it is tagged for ECR
+      - ./containers/mujoco/test-image.sh mujoco-training:latest
       - docker tag mujoco-training:latest "$ECR_REPO_URI:latest"
   post_build:
     commands:
+      # post_build runs even when build failed (a failed smoke test included): push only a passing image
+      - '[ "$CODEBUILD_BUILD_SUCCEEDING" = "1" ] || { echo "Build failed, not pushing"; exit 1; }'
       - echo "Pushing to ECR..."
       - docker push "$ECR_REPO_URI:latest"
       - 'echo "Done. Image: $ECR_REPO_URI:latest"'

@@ -20,7 +20,8 @@ FROM nvcr.io/nvidia/cuda:12.9.2-base-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Python, plus the GL/EGL libraries MuJoCo's offscreen renderer loads and
-# ffmpeg for writing rollout MP4s
+# ffmpeg for writing rollout MP4s. OSMesa is the software renderer the CPU
+# smoke test (test-image.sh) uses where no GPU is present.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-venv \
@@ -29,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libopengl0 \
     libgles2 \
     libglvnd0 \
+    libosmesa6 \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 

@@ -79,7 +79,11 @@ ci:
     integration:
       # Real dependencies as containers on the runner (Postgres, MinIO, Redis, the repo's own
       # API image); terraform validate + test for *.tftest.hcl. Mocked clouds are the fast lane.
-      skip: "no service to run as a container: pai and the CDK/Terraform code call only AWS APIs, and no *.tftest.hcl exists"
+      # The repo's own MuJoCo image: only the CodeBuild image build (containers/mujoco/buildspec.yml)
+      # runs this, after its docker build and before the push, as a CPU smoke run of the training
+      # entrypoint. It needs that freshly built mujoco-training:latest, so no box or PR runner runs it.
+      command: "./containers/mujoco/test-image.sh mujoco-training:latest"
+      trigger: deploy
     e2e:
       # Playwright journeys against the locally started app with side effects stubbed, plus the
       # frontline fixture crawl (ADR 033). A repo with a UI and no journeys is not done.
@@ -92,10 +96,7 @@ ci:
       skip: "no hosted origin: the CDK and Terraform stacks deploy into each user's own AWS account, with no shared URL or health endpoint to smoke"
   # Test material no lane runs, each entry against an OPEN bead (ADR 035 rule 2). The check
   # fails an entry whose bead is closed or whose path is gone.
-  orphans_allowed:
-    - path: containers/mujoco/test_train_entrypoint.py
-      reason: CPU smoke run needs the MuJoCo image's mujoco/playground/jax, offscreen GL and ffmpeg; no lane runs inside the built image yet
-      bead: sampleawsphysicalaitoolchain-d6z
+  orphans_allowed: []
   #  - path: tests/manual
   #    reason: needs a GPU box; runs from the box timer
   #    bead: <prefix>-xxxxx
