@@ -12,7 +12,7 @@
 set -e
 
 REGION="us-east-2"
-ACCOUNT_ID="804152302157"
+ACCOUNT_ID="${ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text --region "$REGION")}"
 DATASETS_BUCKET="physical-ai-dev-datasets-${ACCOUNT_ID}"
 
 echo "=== Step 1: Verify server is ready ==="
