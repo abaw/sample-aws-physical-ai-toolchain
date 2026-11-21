@@ -11,6 +11,60 @@ data "aws_ssm_parameter" "mujoco_ecr" {
   name = "/${var.project_name}/ecr/mujoco"
 }
 
+data "aws_ssm_parameter" "datasets_bucket" {
+  name = "/${var.project_name}/datasets-bucket"
+}
+
+# =============================================================================
+# CODEBUILD SOURCE: REPO ARCHIVE
+# =============================================================================
+# The buildspec runs `docker build -f containers/mujoco/Dockerfile .` and
+# ./containers/mujoco/test-image.sh from the repo root, so CodeBuild needs the
+# checkout. Covers the CDK ContainerBuild.sourceAsset excludes plus gitignored
+# secrets, Terraform state and vars, which must never leave the machine.
+
+data "archive_file" "mujoco_source" {
+  type        = "zip"
+  source_dir  = "${path.module}/../.."
+  output_path = "${path.module}/.terraform/mujoco-source.zip"
+  excludes = [
+    # Unlike CDK's, these match from the repo root unless prefixed with **/
+    ".git",
+    ".claude",
+    ".beads",
+    ".kiro",
+    ".vscode",
+    "plans",
+    "CLAUDE.md",
+    "**/node_modules",
+    "cdk/cdk.out*",
+    "cdk/cdk.context.json",
+    "cdk/*.js",
+    "cdk/*.d.ts",
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/.venv",
+    "**/venv",
+    "**/.DS_Store",
+    "**/.env",
+    "**/*.env.local",
+    "**/osmo_values.yaml",
+    "**/.terraform",
+    "**/*.tfstate",
+    "**/*.tfstate.*",
+    "**/*.tfvars",
+    "data/**",
+    "training/data/**",
+  ]
+}
+
+resource "aws_s3_object" "mujoco_source" {
+  bucket = data.aws_ssm_parameter.datasets_bucket.value
+  key    = "codebuild-source/mujoco-source.zip"
+  source = data.archive_file.mujoco_source.output_path
+  etag   = data.archive_file.mujoco_source.output_md5
+}
+
 # =============================================================================
 # CODEBUILD: MUJOCO CONTAINER
 # =============================================================================
@@ -47,7 +101,8 @@ resource "aws_codebuild_project" "mujoco" {
   }
 
   source {
-    type      = "NO_SOURCE"
+    type      = "S3"
+    location  = "${aws_s3_object.mujoco_source.bucket}/${aws_s3_object.mujoco_source.key}"
     buildspec = file("${path.module}/../../containers/mujoco/buildspec.yml")
   }
 
