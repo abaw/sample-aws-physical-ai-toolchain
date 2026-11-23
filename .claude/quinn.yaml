@@ -96,7 +96,10 @@ ci:
       skip: "no hosted origin: the CDK and Terraform stacks deploy into each user's own AWS account, with no shared URL or health endpoint to smoke"
   # Test material no lane runs, each entry against an OPEN bead (ADR 035 rule 2). The check
   # fails an entry whose bead is closed or whose path is gone.
-  orphans_allowed: []
+  orphans_allowed:
+    - path: mujoco-on-aws/infra/tests
+      reason: terraform test (mocked AWS, offline) needs a real terraform and registry.terraform.io; the box has only a shim and the repo has no CI workflows
+      bead: sampleawsphysicalaitoolchain-dvs
   #  - path: tests/manual
   #    reason: needs a GPU box; runs from the box timer
   #    bead: <prefix>-xxxxx
